@@ -1,0 +1,62 @@
+[project]
+name = "hyppopipe"
+version = "0.1.0"
+description = "Modern framework for ML-pipelines creation."
+authors = [
+    {name = "Geolan84",email = "gmlanin@edu.hse.ru"}
+]
+readme = "README.md"
+requires-python = ">=3.11,<3.14.1"
+dependencies = [
+    "pydicom (>=3.0.2,<4.0.0)",
+    "torchvision (>=0.26.0,<0.27.0)",
+    "matplotlib (>=3.10.8,<4.0.0)",
+    "opencv-python (>=4.13.0.92,<5.0.0.0)"
+]
+
+[project.urls]
+Repository = "https://git.cs.hse.ru/edu/sse/2025_26/theses/Georgii-Lanin-gmlanin"
+
+[tool.poetry]
+packages = [{include = "hyppopipe", from = "src"}]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+docs = [
+    "zensical (>=0.0.29,<0.0.30)",
+    "mkdocstrings-python (>=2.0.3,<3.0.0)",
+]
+tests = [
+    "pytest (>=9.0.2,<10.0.0)",
+    "pytest-mock (>=3.15.1,<4.0.0)",
+    "pytest-cov (>=7.1.0,<8.0.0)"
+]
+lint = [
+    "ruff (>=0.15.8,<0.16.0)",
+    "pre-commit (>=4.5.1,<5.0.0)"
+]
+dev = [
+    "ipykernel (>=7.2.0,<8.0.0)"
+]
+
+[tool.ruff]
+exclude = [".venv"]
+line-length = 88
+indent-width = 4
+
+[tool.ruff.format]
+skip-magic-trailing-comma = false
+quote-style = "double"
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = true
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+

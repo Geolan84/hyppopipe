@@ -1,0 +1,10 @@
+{
+    "recommendations": [
+        "ms-python.python",
+        "ms-python.debugpy",
+        "charliermarsh.ruff",
+        "astral-sh.ty",
+        "eamodio.gitlens",
+        "njpwerner.autodocstring",
+    ]
+}
