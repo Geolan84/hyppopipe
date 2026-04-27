@@ -12,7 +12,8 @@ dependencies = [
     "torchvision (>=0.26.0,<0.27.0)",
     "matplotlib (>=3.10.8,<4.0.0)",
     "opencv-python (>=4.13.0.92,<5.0.0.0)",
-    "tqdm (>=4.67.3,<5.0.0)"
+    "tqdm (>=4.67.3,<5.0.0)",
+    "filetype (>=1.2.0,<2.0.0)"
 ]
 
 [project.urls]
