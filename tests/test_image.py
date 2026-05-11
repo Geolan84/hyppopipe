@@ -72,6 +72,15 @@ def test_from_path_mime_mismatch_raises(tmp_path: Path) -> None:
         Image.from_path(dst)
 
 
+def test_from_path_strict_false_allows_extension_mime_mismatch(tmp_path: Path) -> None:
+    """PNG payload under .jpg — типичный случай «ложного» расширения в датасетах."""
+    src = EXAMPLES_IMAGES / "140_G.png"
+    dst = tmp_path / "wrong.jpg"
+    shutil.copyfile(src, dst)
+    img = Image.from_path(dst, strict=False)
+    assert isinstance(img.body, torch.Tensor) and img.body.numel() > 0
+
+
 def test_from_path_unknown_signature_raises(tmp_path: Path) -> None:
     p = tmp_path / "empty.png"
     p.write_bytes(b"not a real png")

@@ -213,3 +213,8 @@ __marimo__/
 # Debug files
 example_main.py
 *.pt
+
+# dev resources
+artifacts/
+datasets/
+dev_examples/

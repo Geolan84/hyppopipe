@@ -2,10 +2,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-import cv2
 import filetype
 import numpy as np
+import torchvision.transforms as transforms
 from matplotlib import pyplot as plt
+from PIL import Image as PILImage
 from pydicom import dcmread
 from torch import Tensor, from_numpy
 from torchvision.io import decode_image
@@ -38,34 +39,47 @@ def _ensure_content_matches_suffix(path: Path, suffix: str) -> None:
 def _decode_tiff(path: Path) -> Tensor:
     """
     Loads TIFF as uint8 CHW RGB to align with ``torchvision.io.decode_image``.
-    Uses OpenCV (already a project dependency); ``decode_image`` does not support TIFF.
+    Uses Pillow; ``decode_image`` does not support TIFF.
     """
-    arr = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-    if arr is None:
-        raise ValueError(f"File {path} could not be decoded as TIFF")
+    try:
+        pil_img = PILImage.open(path)
+        pil_img.load()
+    except OSError as e:
+        raise ValueError(f"File {path} could not be decoded as TIFF") from e
+
+    if pil_img.mode == "P":
+        pil_img = pil_img.convert("RGB")
+    elif pil_img.mode == "PA":
+        pil_img = pil_img.convert("RGBA")
+    elif pil_img.mode == "LA":
+        pil_img = pil_img.convert("L")
+    elif pil_img.mode == "CMYK":
+        pil_img = pil_img.convert("RGB")
+
+    arr = np.asarray(pil_img)
     if arr.dtype != np.uint8:
-        arr = cv2.normalize(
-            arr,
-            None,
-            0,
-            255,
-            cv2.NORM_MINMAX,
-            dtype=cv2.CV_8U,
-        )
+        arr_f = arr.astype(np.float64, copy=False)
+        arr_min = arr_f.min()
+        arr_max = arr_f.max()
+        if arr_max > arr_min:
+            arr = ((arr_f - arr_min) / (arr_max - arr_min) * 255.0).astype(np.uint8)
+        else:
+            arr = np.zeros(arr.shape, dtype=np.uint8)
+
     arr = np.ascontiguousarray(arr)
     if arr.ndim == 2:
-        return from_numpy(arr).unsqueeze(0)
+        return from_numpy(arr.copy()).unsqueeze(0)
     if arr.ndim == 3:
         channels = arr.shape[2]
         if channels == 3:
-            rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+            rgb = arr
         elif channels == 4:
-            rgb = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
+            rgb = arr[:, :, :3]
         else:
             raise ValueError(
                 f"File {path} has unsupported TIFF channel layout (shape {arr.shape})"
             )
-        return from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1)
+        return from_numpy(np.ascontiguousarray(rgb).copy()).permute(2, 0, 1)
     raise ValueError(f"File {path} has unsupported TIFF array shape {arr.shape}")
 
 
@@ -96,14 +110,15 @@ class Image(DataResource):
         plt.show(**kwargs)
 
     @classmethod
-    def from_path(cls, path: Path | str) -> Self:
+    def from_path(cls, path: Path | str, *, strict: bool = True) -> Self:
         path = Path(path)
         if not path.is_file():
             raise ValueError(f"File {path} is not a file")
         suffix = path.suffix.lower()
         if suffix not in SUPPORTED_FILE_TYPES:
             raise ValueError(f"File {path} is not a supported image file")
-        _ensure_content_matches_suffix(path, suffix)
+        if strict:
+            _ensure_content_matches_suffix(path, suffix)
         sample_id = path.with_suffix("").name
         match suffix:
             case ".dcm":
@@ -112,6 +127,10 @@ class Image(DataResource):
                 return cls(_decode_tiff(path), sample_id)
             case _:
                 return cls(decode_image(str(path)), sample_id)
+
+    @property
+    def as_gray(self) -> Tensor:
+        return transforms.Grayscale(num_output_channels=1)(self.body)
 
     @property
     def tensor(self) -> Tensor:

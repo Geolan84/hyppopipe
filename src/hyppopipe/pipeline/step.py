@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from hyppopipe.types import NO_VALUE
@@ -11,14 +11,16 @@ class Step:
         action_args: tuple[Any, ...] | None = None,
         action_kwargs: dict[str, Any] | None = None,
         *,
-        inputs: set[str] | None = None,
+        inputs: Sequence[str] | None = None,
         name: str | None = None,
         description: str | None = None,
+        input_prepare: Callable[[tuple[Any, ...]], tuple[Any, ...]] | None = None,
     ):
         self.action = action
         self.action_args = action_args or ()
         self.action_kwargs = action_kwargs or {}
         self.inputs = inputs
+        self.input_prepare = input_prepare
         self.name = name
         self.description = description
 
