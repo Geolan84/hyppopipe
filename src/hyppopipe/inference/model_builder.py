@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.nn import Module
 
 from hyppopipe.pipeline.image.classification import ImageClassifier
 from hyppopipe.pipeline.image.localization import ImageLocalizer
+from hyppopipe.pipeline.image.segmentation import ImageSegmentator, SegmentationKind
 from hyppopipe.train.bundle import StepArtifact
 from hyppopipe.train.model_spec import instantiate_base_from_spec
 from hyppopipe.train.tasks.classification import prepare_classification_model_from_meta
 from hyppopipe.train.tasks.detection import prepare_detection_model_from_meta
+from hyppopipe.train.tasks.segmentation import prepare_segmentation_model_from_meta
 
 
 def build_and_load_step_model(
@@ -60,6 +62,20 @@ def build_and_load_step_model(
             msg = f"Step {step_name!r}: inference_meta missing num_classes"
             raise ValueError(msg)
         prepared = prepare_detection_model_from_meta(base, num_classes=int(n_cls))
+    elif task == "segmentation":
+        if not isinstance(step_action, ImageSegmentator):
+            msg = f"Step {step_name!r}: expected ImageSegmentator action"
+            raise TypeError(msg)
+        n_cls = meta.get("num_classes")
+        kind = meta.get("kind")
+        if n_cls is None or kind not in ("instance", "semantic"):
+            msg = f"Step {step_name!r}: inference_meta missing num_classes or kind"
+            raise ValueError(msg)
+        prepared = prepare_segmentation_model_from_meta(
+            base,
+            kind=cast(SegmentationKind, kind),
+            num_classes=int(n_cls),
+        )
     else:
         msg = f"Unsupported inference task {task!r} for step {step_name!r}"
         raise ValueError(msg)

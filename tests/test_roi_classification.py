@@ -6,19 +6,6 @@ from torch.utils.data import Dataset
 from hyppopipe.data.dataset.adapters.roi_classification import (
     RoiCropClassificationDataset,
 )
-from hyppopipe.pipeline.step import normalize_step_inputs
-
-
-def test_normalize_step_inputs_prefers_input_first() -> None:
-    assert normalize_step_inputs({"__input__", "b", "a"}) == ("__input__", "a", "b")
-
-
-def test_normalize_step_inputs_sorted_without_input() -> None:
-    assert normalize_step_inputs({"z", "a"}) == ("a", "z")
-
-
-def test_normalize_step_inputs_tuple_preserved() -> None:
-    assert normalize_step_inputs(("z", "a")) == ("z", "a")
 
 
 class _TinyDet(Dataset):

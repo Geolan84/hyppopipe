@@ -4,12 +4,14 @@ from hyppopipe.inference.types import (
     ClassificationPrediction,
     LocalizationPrediction,
     PipelinePrediction,
+    SegmentationPrediction,
 )
 
 __all__ = [
     "ClassificationPrediction",
     "LocalizationPrediction",
     "PipelinePrediction",
+    "SegmentationPrediction",
     "build_and_load_step_model",
     "run_step_inference",
 ]

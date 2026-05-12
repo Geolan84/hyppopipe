@@ -162,6 +162,68 @@ class ClassificationPrediction:
 
 
 @dataclass(slots=True)
+class SegmentationPrediction:
+    """Выход сегментации: semantic class-map или instance masks."""
+
+    kind: str
+    masks: Tensor
+    source_image: Image | None = None
+    class_names: list[str] | None = None
+    boxes: Tensor | None = None
+    labels: Tensor | None = None
+    scores: Tensor | None = None
+    score_thresh: float | None = None
+
+    def show(
+        self,
+        image: Image | None = None,
+        *,
+        score_thresh: float | None = None,
+        alpha: float = 0.45,
+        figsize: tuple[float, float] | None = None,
+        ax: Any | None = None,
+        **kwargs: Any,
+    ) -> None:
+        image_to_show = image or self.source_image
+        if image_to_show is None:
+            msg = "SegmentationPrediction.show() requires image=... when source image is absent"
+            raise ValueError(msg)
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+        display = _image_to_display_array(image_to_show)
+        if display.ndim == 2:
+            ax.imshow(display, cmap="gray")
+        else:
+            ax.imshow(display)
+
+        masks_cpu = self.masks.detach().cpu()
+        if self.kind == "semantic":
+            ax.imshow(masks_cpu.numpy(), alpha=alpha, cmap="tab20")
+        else:
+            idxs = list(range(int(masks_cpu.shape[0])))
+            threshold = self.score_thresh if score_thresh is None else score_thresh
+            scores_cpu = self.scores.detach().cpu() if self.scores is not None else None
+            if threshold is not None and scores_cpu is not None:
+                idxs = [i for i in idxs if float(scores_cpu[i].item()) >= threshold]
+            overlay = np.zeros(display.shape[:2], dtype=np.int32)
+            for offset, i in enumerate(idxs, start=1):
+                mask = masks_cpu[i]
+                if mask.ndim == 3 and mask.shape[0] == 1:
+                    mask = mask.squeeze(0)
+                overlay[mask.numpy() > 0.5] = offset
+            if idxs:
+                ax.imshow(
+                    np.ma.masked_where(overlay == 0, overlay), alpha=alpha, cmap="tab20"
+                )
+
+        if image_to_show.sample_id:
+            ax.set_title(image_to_show.sample_id)
+        ax.axis("off")
+        plt.show(**kwargs)
+
+
+@dataclass(slots=True)
 class PipelinePrediction:
     """Результат ``Pipeline.predict``: значения по именам шагов."""
 

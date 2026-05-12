@@ -58,14 +58,10 @@ def _topological_step_order(steps: Mapping[str, Step]) -> list[str]:
 
 class Pipeline:
     @overload
-    def __init__(
-        self, steps: Iterable[Step | Pipeline], *, shift_result: bool = True
-    ): ...
+    def __init__(self, steps: Iterable[Step], *, shift_result: bool = True): ...
 
     @overload
-    def __init__(
-        self, steps: Mapping[str, Step | Pipeline], *, shift_result: bool = True
-    ): ...
+    def __init__(self, steps: Mapping[str, Step], *, shift_result: bool = True): ...
 
     @overload
     def __init__(self, steps: Pipeline, *, shift_result: bool = True): ...

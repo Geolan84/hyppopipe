@@ -4,17 +4,27 @@ import logging
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module
 
 from hyppopipe.data.image import Image
 from hyppopipe.inference.model_builder import build_and_load_step_model
-from hyppopipe.inference.types import ClassificationPrediction, LocalizationPrediction
+from hyppopipe.inference.types import (
+    ClassificationPrediction,
+    LocalizationPrediction,
+    SegmentationPrediction,
+)
 from hyppopipe.pipeline.image.classification import ImageClassifier
 from hyppopipe.pipeline.image.localization import ImageLocalizer
+from hyppopipe.pipeline.image.segmentation import ImageSegmentator
 from hyppopipe.pipeline.step import Step
 from hyppopipe.train.bundle import StepArtifact
-from hyppopipe.train.tasks.classification import default_classification_transform
+from hyppopipe.train.tasks.classification import (
+    _ensure_channel_count,
+    _normalize_tensor_imagenet_style,
+    default_classification_transform,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +141,77 @@ def run_classification(
     )
 
 
+def run_segmentation(
+    model: Module,
+    image: Image,
+    artifact: StepArtifact,
+    *,
+    device: torch.device,
+    score_thresh: float,
+) -> SegmentationPrediction:
+    meta = artifact.inference_meta
+    kind = meta.get("kind")
+    if kind == "instance":
+        inp = _tensor_for_detection(image, device)
+        model.eval()
+        with torch.no_grad():
+            pred = model([inp])[0]
+        return SegmentationPrediction(
+            kind="instance",
+            masks=pred["masks"],
+            boxes=pred.get("boxes"),
+            labels=pred.get("labels"),
+            scores=pred.get("scores"),
+            source_image=image,
+            class_names=artifact.class_names,
+            score_thresh=score_thresh,
+        )
+
+    if kind != "semantic":
+        msg = f"Unsupported segmentation kind {kind!r}"
+        raise ValueError(msg)
+
+    input_channels = int(meta.get("input_channels", 3))
+    image_size = meta.get("image_size")
+    original_size = tuple(int(x) for x in image.body.shape[-2:])
+    x = image.body
+    if x.dtype == torch.uint8:
+        x = x.float() / 255.0
+    else:
+        x = x.float()
+        if x.numel() > 0 and x.max() > 1.5:
+            x = x / 255.0
+    x = _ensure_channel_count(x, input_channels)
+    if image_size is not None:
+        x = F.interpolate(
+            x.unsqueeze(0),
+            size=tuple(image_size),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+    x = _normalize_tensor_imagenet_style(x).unsqueeze(0).to(device)
+
+    model.eval()
+    with torch.no_grad():
+        output = model(x)
+    logits = output["out"] if isinstance(output, dict) else output
+    if logits.shape[-2:] != original_size:
+        logits = F.interpolate(
+            logits,
+            size=original_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+    probs = logits.softmax(dim=1)[0]
+    class_map = probs.argmax(dim=0)
+    return SegmentationPrediction(
+        kind="semantic",
+        masks=class_map,
+        source_image=image,
+        class_names=artifact.class_names,
+    )
+
+
 def image_from_step_inputs(inputs: tuple[Any, ...]) -> Image:
     if not inputs:
         msg = "Step has no inputs"
@@ -154,7 +235,7 @@ def run_step_inference(
     score_thresh: float,
     models_cache: dict[str, Module],
     step_base_models: dict[str, Module] | None,
-) -> LocalizationPrediction | ClassificationPrediction:
+) -> LocalizationPrediction | ClassificationPrediction | SegmentationPrediction:
     if step.input_prepare is not None:
         inputs = step.input_prepare(inputs)
     if step_name not in models_cache:
@@ -183,6 +264,16 @@ def run_step_inference(
     if isinstance(step.action, ImageClassifier):
         img = image_from_step_inputs(inputs)
         return run_classification(model, img, artifact, device=device)
+
+    if isinstance(step.action, ImageSegmentator):
+        img = image_from_step_inputs(inputs)
+        return run_segmentation(
+            model,
+            img,
+            artifact,
+            device=device,
+            score_thresh=score_thresh,
+        )
 
     msg = f"Unsupported step action {type(step.action).__name__} for inference"
     raise TypeError(msg)

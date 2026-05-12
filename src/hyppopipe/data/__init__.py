@@ -1,4 +1,5 @@
 from hyppopipe.data.dataset import ImageDataset, ImageFolderDataset
+from hyppopipe.data.dataset.readers import PairedImageMaskFolderDataset
 from hyppopipe.data.dataset.readers.yaml_dataset import (
     YAMLDataset,
     YAMLSplitResource,
@@ -13,6 +14,7 @@ from hyppopipe.data.dataset.splits import (
 
 __all__ = [
     "ImageFolderDataset",
+    "PairedImageMaskFolderDataset",
     "SplitData",
     "TrainVal",
     "TrainValTest",

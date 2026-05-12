@@ -29,3 +29,13 @@ class DetectionDataUnsupportedError(HyppopipeError):
 
     def __str__(self) -> str:
         return self.message
+
+
+class SegmentationDataUnsupportedError(HyppopipeError):
+    """Split or dataset does not provide segmentation data."""
+
+    def __init__(self, message: str):
+        self.message = message
+
+    def __str__(self) -> str:
+        return self.message

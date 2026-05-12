@@ -6,7 +6,7 @@ from typing import TypeAlias, overload
 import torch
 from torch.utils.data import Dataset, random_split
 
-from hyppopipe.data.dataset import ImageDataset
+from hyppopipe.data.dataset.base import ImageDataset
 
 
 @dataclass(frozen=True, slots=True)

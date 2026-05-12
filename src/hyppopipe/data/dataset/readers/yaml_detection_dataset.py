@@ -1,8 +1,9 @@
-"""Датасеты детекции из YAML Ultralytics/YOLOv5 (разметка в формате YOLO bbox)."""
+"""Датасеты детекции из YAML Ultralytics/YOLOv5."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sized
 from pathlib import Path
 from typing import Literal, cast
 
@@ -16,6 +17,7 @@ from hyppopipe.data.dataset.readers.yaml_dataset import resolve_ultralytics_spli
 from hyppopipe.data.image import SUPPORTED_FILE_TYPES
 
 DetectionLayout = Literal["auto", "nested_class", "flat_yolo"]
+_NormalizedBox = tuple[int, float, float, float, float]
 
 
 def _swap_images_dir_to_labels(split_images_root: Path) -> Path:
@@ -48,10 +50,43 @@ def _iter_images_rglob(root: Path) -> list[Path]:
     )
 
 
+def _clip_normalized(value: float) -> float:
+    return max(0.0, min(value, 1.0))
+
+
+def _normalized_box_from_yolo_parts(parts: list[str]) -> _NormalizedBox | None:
+    if len(parts) == 5:
+        cls_id = int(float(parts[0]))
+        cx, cy, w, h = map(float, parts[1:5])
+        x1 = cx - w / 2.0
+        y1 = cy - h / 2.0
+        x2 = cx + w / 2.0
+        y2 = cy + h / 2.0
+    elif len(parts) >= 7 and len(parts) % 2 == 1:
+        cls_id = int(float(parts[0]))
+        coords = list(map(float, parts[1:]))
+        xs = coords[0::2]
+        ys = coords[1::2]
+        x1 = min(xs)
+        y1 = min(ys)
+        x2 = max(xs)
+        y2 = max(ys)
+    else:
+        return None
+
+    x1 = _clip_normalized(x1)
+    y1 = _clip_normalized(y1)
+    x2 = _clip_normalized(x2)
+    y2 = _clip_normalized(y2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return cls_id, x1, y1, x2, y2
+
+
 def _flat_yolo_roi_cls_from_label_file(
     lbl_path: Path | None, *, num_foreground_classes: int
 ) -> int:
-    """0-based класс для ROI-классификации: YOLO-класс бокса с максимальной нормированной площадью."""
+    """0-based класс для ROI-классификации: YOLO-класс объекта с максимальной площадью."""
     if lbl_path is None or not lbl_path.is_file():
         return 0
     text = lbl_path.read_text(encoding="utf-8")
@@ -61,12 +96,11 @@ def _flat_yolo_roi_cls_from_label_file(
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        parts = line.split()
-        if len(parts) < 5:
+        parsed = _normalized_box_from_yolo_parts(line.split())
+        if parsed is None:
             continue
-        cls_id = int(float(parts[0]))
-        _cx, _cy, w, h = map(float, parts[1:5])
-        area = w * h
+        cls_id, x1, y1, x2, y2 = parsed
+        area = (x2 - x1) * (y2 - y1)
         if area > best_area:
             best_area = area
             best_cls = cls_id
@@ -89,21 +123,14 @@ def _parse_yolo_bbox_lines(
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        parts = line.split()
-        if len(parts) < 5:
+        parsed = _normalized_box_from_yolo_parts(line.split())
+        if parsed is None:
             continue
-        cls_id = int(float(parts[0]))
-        cx, cy, w, h = map(float, parts[1:5])
-        x1 = (cx - w / 2.0) * img_w
-        y1 = (cy - h / 2.0) * img_h
-        x2 = (cx + w / 2.0) * img_w
-        y2 = (cy + h / 2.0) * img_h
-        x1 = max(0.0, min(x1, float(img_w)))
-        x2 = max(0.0, min(x2, float(img_w)))
-        y1 = max(0.0, min(y1, float(img_h)))
-        y2 = max(0.0, min(y2, float(img_h)))
-        if x2 <= x1 or y2 <= y1:
-            continue
+        cls_id, x1, y1, x2, y2 = parsed
+        x1 *= img_w
+        y1 *= img_h
+        x2 *= img_w
+        y2 *= img_h
         boxes.append([x1, y1, x2, y2])
         labels.append(cls_id)
     if not boxes:
@@ -125,7 +152,7 @@ class ConcatDetectionDataset(ConcatDataset):
     def roi_classification_label(self, index: int) -> int:
         i = int(index)
         for ds in self.datasets:
-            n = len(ds)
+            n = len(cast(Sized, ds))
             if i < n:
                 fn = getattr(ds, "roi_classification_label", None)
                 if fn is None:
@@ -140,7 +167,7 @@ class ConcatDetectionDataset(ConcatDataset):
 
 
 class YAMLDetectionSplitDataset(Dataset[tuple[Tensor, dict[str, Tensor]]]):
-    """Один сплит: изображения и YOLO-.txt с bbox (нормализованные cx,cy,w,h)."""
+    """Один сплит: изображения и YOLO-.txt с bbox или сегментационными полигонами."""
 
     def __init__(
         self,

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
-from operator import attrgetter
 from pathlib import Path
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
-from hyppopipe.data.dataset import ImageDataset
+if TYPE_CHECKING:
+    from hyppopipe.data.dataset.splits import TrainVal, TrainValTest
+
+from hyppopipe.data.dataset.base import ImageDataset
 from hyppopipe.data.dataset.protocols import ClassificationConvertible
+from hyppopipe.data.dataset.splits import split_random_fractions
 from hyppopipe.data.image import SUPPORTED_FILE_TYPES, Image
 
 
@@ -80,28 +83,82 @@ class PairedImageMaskFolderDataset(ImageDataset):
         image_folder: str | Path = "images",
         mask_folder: str | Path = "masks",
         *,
+        class_names: list[str] | None = None,
         strict: bool = True,
     ):
         self.root = Path(root)
         self.image_folder = self.root / Path(image_folder)
         self.mask_folder = self.root / Path(mask_folder)
         if not self.image_folder.is_dir():
-            raise ValueError(f"Image folder {self.image_folder} is not a directory")
+            raise ValueError(f"Image folder {image_folder} is not a directory")
         if not self.mask_folder.is_dir():
-            raise ValueError(f"Mask folder {self.mask_folder} is not a directory")
+            raise ValueError(f"Mask folder {mask_folder} is not a directory")
         self._strict = strict
-        self.samples = list(
-            zip(
-                sorted(self.image_folder.rglob("*"), key=attrgetter("name")),
-                sorted(self.mask_folder.rglob("*"), key=attrgetter("name")),
-            )
-        )
+        if class_names is not None:
+            self.classes = list(class_names)
+        self.samples = self._build_pairs()
 
-    def __getitem__(self, index):
+    def as_segmentation_dataset(self, *, kind: str = "semantic") -> Self:
+        if kind != "semantic":
+            raise ValueError(
+                "PairedImageMaskFolderDataset supports only semantic segmentation"
+            )
+        return self
+
+    def as_split_data(
+        self,
+        fractions: tuple[float, float] | tuple[float, float, float] = (0.8, 0.2),
+        *,
+        seed: int | None = None,
+    ) -> TrainVal | TrainValTest:
+        """Как у ``YAMLDataset.as_split_data``: возвращает ``TrainVal`` / ``TrainValTest`` для ``Trainer``.
+
+        В отличие от YAML, здесь один каталог пар изображение–маска, поэтому сплит
+        делается случайно через ``split_random_fractions`` (доли по умолчанию
+        ``(0.8, 0.2)`` — train/val).
+        """
+        return split_random_fractions(self, fractions, seed=seed)
+
+    def __getitem__(self, index: int):
         image_path, mask_path = self.samples[index]
         image = Image.from_path(image_path, strict=self._strict)
         mask = Image.from_path(mask_path, strict=self._strict)
-        return image.body, mask.as_gray
+        return image.body, self._mask_to_class_map(mask)
 
     def __len__(self) -> int:
         return len(self.samples)
+
+    def _build_pairs(self) -> list[tuple[Path, Path]]:
+        image_paths = [
+            p
+            for p in sorted(self.image_folder.rglob("*"), key=lambda p: p.name)
+            if p.is_file() and p.suffix.lower() in SUPPORTED_FILE_TYPES
+        ]
+        mask_by_stem = {
+            p.stem: p
+            for p in sorted(self.mask_folder.rglob("*"), key=lambda p: p.name)
+            if p.is_file() and p.suffix.lower() in SUPPORTED_FILE_TYPES
+        }
+        missing = [p.name for p in image_paths if p.stem not in mask_by_stem]
+        if missing:
+            raise ValueError(
+                f"Missing masks for {len(missing)} image(s): {', '.join(missing[:5])}"
+            )
+        samples = [(p, mask_by_stem[p.stem]) for p in image_paths]
+        if not samples:
+            raise ValueError(f"No image/mask pairs found under {self.root}")
+        return samples
+
+    def _mask_to_class_map(self, mask: Image):
+        out = mask.as_gray.squeeze(0).long()
+        if out.numel() == 0:
+            return out
+        unique_values = {int(v) for v in out.unique().tolist()}
+        has_single_foreground_class = (
+            hasattr(self, "classes") and len(getattr(self, "classes")) == 1
+        )
+        if unique_values <= {0, 255} or (
+            has_single_foreground_class and max(unique_values) > 1
+        ):
+            return (out > 0).long()
+        return out

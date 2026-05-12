@@ -85,9 +85,9 @@ def _coerce_split_field(raw: object, field_name: str) -> str | list[str]:
     raise InvalidDatasetConfigError(f"{field_name} must be str or list[str]")
 
 
-def _parse_config_dict(raw: dict[str, object]) -> YAMLDatasetConfig:
+def _parse_config_dict(raw: dict[str, object], path: Path) -> YAMLDatasetConfig:
     try:
-        path = raw["path"]
+        path = raw.get("path", str(path))
         train = raw["train"]
         val = raw["val"]
         names = raw["names"]
@@ -372,7 +372,7 @@ def load_ultralytics_dataset_yaml(
         raise InvalidDatasetConfigError("YAML root must be a mapping")
 
     try:
-        config = _parse_config_dict(raw)
+        config = _parse_config_dict(raw, path_to_yaml.parent)
     except InvalidDatasetConfigError:
         raise
     except Exception as e:
@@ -415,6 +415,20 @@ class YAMLSplitResource:
             yaml_dir=self.yaml_dir,
             dataset_root=self.dataset_root,
             class_names=self.class_names,
+            layout=self.detection_layout,
+        )
+
+    def as_segmentation_dataset(self, *, kind: str = "instance") -> Dataset:
+        from hyppopipe.data.dataset.readers.yaml_segmentation_dataset import (
+            concat_segmentation_split,
+        )
+
+        return concat_segmentation_split(
+            self.entries,
+            yaml_dir=self.yaml_dir,
+            dataset_root=self.dataset_root,
+            class_names=self.class_names,
+            kind=kind,
             layout=self.detection_layout,
         )
 

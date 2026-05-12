@@ -145,6 +145,25 @@ def test_localization_prediction_show_draws_filtered_detections(
     plt.close("all")
 
 
+def test_instantiate_deeplab_from_spec_restores_aux_classifier_via_weights_enum() -> (
+    None
+):
+    """``weights=None`` даёт DeepLab без aux; при ``weights_enum`` как при обучении — та же топология."""
+    from hyppopipe.train.model_spec import instantiate_base_from_spec
+
+    spec = {
+        "kind": "torchvision_factory",
+        "factory": "torchvision.models.segmentation.deeplabv3.deeplabv3_resnet50",
+        "weights_enum": (
+            "torchvision.models.segmentation.deeplabv3.DeepLabV3_ResNet50_Weights.DEFAULT"
+        ),
+    }
+    model = instantiate_base_from_spec(spec)
+
+    assert model.aux_classifier is not None
+    assert any(k.startswith("aux_classifier.") for k in model.state_dict())
+
+
 def test_ssdlite_factory_matches_coco_trained_backbone_width() -> None:
     """``weights=None`` defaults to ImageNet backbone (wider); COCO-trained checkpoints need reduced tail."""
     from hyppopipe.train.model_spec import instantiate_base_from_spec
