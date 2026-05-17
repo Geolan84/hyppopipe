@@ -41,10 +41,11 @@ def resolve_device(device: str | torch.device | None) -> torch.device:
 OptimizerFactory = Callable[[Iterable[torch.nn.Parameter]], Optimizer]
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class TrainingConfig:
     epochs: int = 10
     batch_size: int = 32
+    val_batch_size: int | None = None
     lr: float = 1e-3
     num_workers: int = 0
     seed: int | None = None
@@ -60,6 +61,11 @@ class TrainingConfig:
 
     def copy_with(self, **changes: Any) -> TrainingConfig:
         return replace(self, **changes)
+
+    def resolve_val_batch_size(self) -> int:
+        if self.val_batch_size is not None:
+            return self.val_batch_size
+        return self.batch_size
 
     def build_optimizer(self, params: Iterable[torch.nn.Parameter]) -> Optimizer:
         if self.optimizer_factory is not None:

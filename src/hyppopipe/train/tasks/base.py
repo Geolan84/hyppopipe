@@ -35,6 +35,8 @@ class TrainingTask(ABC):
         model: Module,
         data: SplitData,
         config: TrainingConfig,
+        *,
+        weights_enum: Any | None = None,
     ) -> tuple[Module, DataLoader[Any], DataLoader[Any]]:
         """Return the prepared model and train/val dataloaders."""
 

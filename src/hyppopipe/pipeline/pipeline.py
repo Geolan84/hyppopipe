@@ -14,9 +14,10 @@ from hyppopipe.data.dataset.splits import SplitData
 from hyppopipe.data.image import Image
 from hyppopipe.inference.run import run_step_inference
 from hyppopipe.inference.types import PipelinePrediction
-from hyppopipe.package_logging import ensure_default_logging
+from hyppopipe.package_logging import LogConfig, ensure_default_logging, run_logging
 from hyppopipe.pipeline.errors import MissingInputsError
 from hyppopipe.pipeline.step import Step
+from hyppopipe.train import TrainingConfig
 from hyppopipe.train.bundle import PredictBundle
 from hyppopipe.train.config import resolve_device
 from hyppopipe.train.result import StepTrainResult, TrainResult
@@ -97,30 +98,39 @@ class Pipeline:
         self,
         step_config: Mapping[str, Trainer],
         data: SplitData | None = None,
+        config: TrainingConfig | None = None,
+        *,
+        log_to: Path | str | LogConfig | None = None,
     ) -> TrainResult:
         missing_keys = set(step_config.keys()) - set(self.steps.keys())
         if missing_keys:
             raise KeyError(f"Keys {missing_keys} are not present in pipeline steps")
 
-        ensure_default_logging()
-        step_names = ", ".join(step_config.keys())
-        logger.info("Pipeline training started for steps: %s", step_names)
+        with run_logging(log_to):
+            step_names = ", ".join(step_config.keys())
+            logger.info("Pipeline training started for steps: %s", step_names)
 
-        steps_out: dict[str, StepTrainResult] = {}
-        for step_name, trainer in step_config.items():
-            if trainer.data is None and data is None:
-                raise ValueError("Training data (TrainVal / TrainValTest) is required")
-            if trainer.data is None:
-                trainer.data = data
-            step = self.steps[step_name]
-            steps_out[step_name] = trainer.train(step=step, step_name=step_name)
-            n_runs = len(steps_out[step_name].runs)
-            logger.info(
-                "Pipeline step %r completed (%d model run(s))", step_name, n_runs
-            )
+            steps_out: dict[str, StepTrainResult] = {}
+            for step_name, trainer in step_config.items():
+                if trainer.data is None and data is None:
+                    raise ValueError(
+                        "Training data (TrainVal / TrainValTest) is required"
+                    )
+                if trainer.data is None:
+                    trainer.data = data
+                step = self.steps[step_name]
+                steps_out[step_name] = trainer.train(
+                    step=step,
+                    step_name=step_name,
+                    config=config,
+                )
+                n_runs = len(steps_out[step_name].runs)
+                logger.info(
+                    "Pipeline step %r completed (%d model run(s))", step_name, n_runs
+                )
 
-        logger.info("Pipeline training finished (%d step(s))", len(steps_out))
-        return TrainResult(steps=steps_out)
+            logger.info("Pipeline training finished (%d step(s))", len(steps_out))
+            return TrainResult(steps=steps_out)
 
     def predict(
         self,

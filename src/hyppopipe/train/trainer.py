@@ -8,11 +8,11 @@ from typing import Any
 
 import torch
 from torch.nn import Module
-from tqdm import tqdm
 from torchvision.models import WeightsEnum
+from tqdm import tqdm
 
 from hyppopipe.data.dataset.splits import SplitData
-from hyppopipe.package_logging import ensure_default_logging
+from hyppopipe.package_logging import LogConfig, run_logging
 from hyppopipe.pipeline.step import Step
 from hyppopipe.train.config import TrainingConfig, apply_seed, resolve_device
 from hyppopipe.train.early_stopping import EarlyStopping
@@ -78,23 +78,37 @@ class Trainer:
         self.config = config if config is not None else TrainingConfig()
         self.ignore_fails = ignore_fails
 
-    def train(self, *, step: Step, step_name: str) -> StepTrainResult:
+    def train(
+        self,
+        *,
+        step: Step,
+        step_name: str,
+        config: TrainingConfig | None = None,
+        log_to: Path | str | LogConfig | None = None,
+    ) -> StepTrainResult:
         if self.data is None:
             raise ValueError("Training is impossible without splitted data")
 
-        ensure_default_logging()
+        if config is not None:
+            self.config = config
+
+        with run_logging(log_to):
+            return self._train_step(step=step, step_name=step_name)
+
+    def _train_step(self, *, step: Step, step_name: str) -> StepTrainResult:
         apply_seed(self.config.seed)
         task = dispatch_training_task(step.action)
 
         n_train, n_val = task.split_lengths(self.data)
         logger.info(
-            "Step %r: starting (%s); train=%d val=%d epochs=%d batch_size=%d device=%s",
+            "Step %r: starting (%s); train=%d val=%d epochs=%d batch_size=%d val_batch_size=%d device=%s",
             step_name,
             step.action.__class__.__name__,
             n_train,
             n_val,
             self.config.epochs,
             self.config.batch_size,
+            self.config.resolve_val_batch_size(),
             resolve_device(self.config.device),
         )
 
@@ -122,6 +136,7 @@ class Trainer:
                                 model_candidate,
                                 weights_member=w_enum,
                             ),
+                            weights_enum=w_enum,
                         )
                         out.runs.append(run)
             except Exception:
@@ -148,12 +163,18 @@ class Trainer:
         step_name: str,
         model_label: str,
         model_spec: dict[str, Any],
+        weights_enum: WeightsEnum | None = None,
     ) -> ModelRunResult:
         assert self.data is not None
         device = resolve_device(self.config.device)
         run_t0 = time.perf_counter()
 
-        prepared, train_loader, val_loader = task.prepare(model, self.data, self.config)
+        prepared, train_loader, val_loader = task.prepare(
+            model,
+            self.data,
+            self.config,
+            weights_enum=weights_enum,
+        )
         inference_meta = task.inference_meta_from_prepared(prepared)
         prepared = prepared.to(device)
         criterion = task.create_criterion(device, self.config)

@@ -244,7 +244,7 @@ def detection_train_val_loaders(
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=config.batch_size,
+        batch_size=config.resolve_val_batch_size(),
         shuffle=False,
         num_workers=config.num_workers,
         pin_memory=pin,
@@ -286,6 +286,8 @@ class DetectionTrainingTask(TrainingTask):
         model: Module,
         data: SplitData,
         config: TrainingConfig,
+        *,
+        weights_enum: Any | None = None,
     ) -> tuple[Module, DataLoader[Any], DataLoader[Any]]:
         train_det = adapt_dataset_for_detection(data.train)
         prepared = prepare_detection_model(model, train_det, self._localizer)

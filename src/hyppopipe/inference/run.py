@@ -20,11 +20,14 @@ from hyppopipe.pipeline.image.localization import ImageLocalizer
 from hyppopipe.pipeline.image.segmentation import ImageSegmentator
 from hyppopipe.pipeline.step import Step
 from hyppopipe.train.bundle import StepArtifact
-from hyppopipe.train.tasks.classification import (
-    _ensure_channel_count,
-    _normalize_tensor_imagenet_style,
-    default_classification_transform,
+from hyppopipe.train.tasks.classification_transforms import (
+    classification_transform_from_spec,
+    ensure_channel_count,
+    normalize_tensor_imagenet_style,
 )
+
+_ensure_channel_count = ensure_channel_count
+_normalize_tensor_imagenet_style = normalize_tensor_imagenet_style
 
 logger = logging.getLogger(__name__)
 
@@ -117,15 +120,13 @@ def run_classification(
     if cc is None:
         msg = "classification inference_meta missing canonical_in_channels"
         raise ValueError(msg)
-    tf = default_classification_transform(canonical_channels=int(cc))
-    x = image.body
-    if x.dtype == torch.uint8:
-        x = x.float().div_(255.0)
-    else:
-        x = x.float()
-        if x.max() > 1.5:
-            x = x.div_(255.0)
-    x = tf(x).unsqueeze(0).to(device)
+    transform_spec = meta.get("transform_spec")
+    tf = classification_transform_from_spec(
+        transform_spec if isinstance(transform_spec, dict) else None,
+        canonical_channels=int(cc),
+        train=False,
+    )
+    x = tf(image.body).unsqueeze(0).to(device)
     model.eval()
     with torch.no_grad():
         logits = model(x)[0]

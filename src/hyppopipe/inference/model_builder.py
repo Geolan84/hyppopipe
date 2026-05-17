@@ -10,7 +10,9 @@ from hyppopipe.pipeline.image.localization import ImageLocalizer
 from hyppopipe.pipeline.image.segmentation import ImageSegmentator, SegmentationKind
 from hyppopipe.train.bundle import StepArtifact
 from hyppopipe.train.model_spec import instantiate_base_from_spec
-from hyppopipe.train.tasks.classification import prepare_classification_model_from_meta
+from hyppopipe.train.tasks.classification_model import (
+    prepare_classification_model_from_meta,
+)
 from hyppopipe.train.tasks.detection import prepare_detection_model_from_meta
 from hyppopipe.train.tasks.segmentation import prepare_segmentation_model_from_meta
 

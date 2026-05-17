@@ -370,7 +370,7 @@ def segmentation_train_val_loaders(
             ),
             DataLoader(
                 val_ds,
-                batch_size=config.batch_size,
+                batch_size=config.resolve_val_batch_size(),
                 shuffle=False,
                 num_workers=config.num_workers,
                 pin_memory=pin,
@@ -401,7 +401,7 @@ def segmentation_train_val_loaders(
         ),
         DataLoader(
             val_ds,
-            batch_size=config.batch_size,
+            batch_size=config.resolve_val_batch_size(),
             shuffle=False,
             num_workers=config.num_workers,
             pin_memory=pin,
@@ -476,6 +476,8 @@ class SegmentationTrainingTask(TrainingTask):
         model: Module,
         data: SplitData,
         config: TrainingConfig,
+        *,
+        weights_enum: Any | None = None,
     ) -> tuple[Module, DataLoader[Any], DataLoader[Any]]:
         backend = infer_segmentation_backend(model)
         effective_kind = resolve_segmentation_data_kind(

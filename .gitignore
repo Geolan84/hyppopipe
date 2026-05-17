@@ -218,3 +218,5 @@ example_main.py
 artifacts/
 datasets/
 dev_examples/
+*.pt
+*.pth
