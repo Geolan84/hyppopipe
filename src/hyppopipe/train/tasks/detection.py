@@ -1,3 +1,9 @@
+"""Object detection training for ``ImageLocalizer`` pipeline steps.
+
+Supports Faster R-CNN-style models, SSD/SSDLite, RetinaNet, and FCOS head adaptation
+with torchvision detection training loops (loss inside the model).
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -14,6 +20,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from hyppopipe.data.dataset.adapters import adapt_dataset_for_detection
 from hyppopipe.data.dataset.splits import SplitData
 from hyppopipe.pipeline.image.localization import ImageLocalizer
+from hyppopipe.train.transforms import DetectionTransforms
 from hyppopipe.train.config import TrainingConfig
 from hyppopipe.train.tasks.base import TrainingTask
 
@@ -21,12 +28,30 @@ from hyppopipe.train.tasks.base import TrainingTask
 def detection_collate_fn(
     batch: list[tuple[torch.Tensor, dict[str, torch.Tensor]]],
 ) -> tuple[list[torch.Tensor], list[dict[str, torch.Tensor]]]:
+    """Collate variable-size detection images into lists for the model API.
+
+    Args:
+        batch: List of ``(image, target_dict)`` samples.
+
+    Returns:
+        Lists of images and target dicts (not stacked tensors).
+    """
     images, targets = zip(*batch, strict=True)
     return list(images), list(targets)
 
 
 def infer_detection_num_classes(dataset: Dataset[Any]) -> int:
-    """Число классов для ``torchvision`` detection (включая фон)."""
+    """Return class count for torchvision detection (including background).
+
+    Args:
+        dataset: Detection dataset with a ``classes`` attribute.
+
+    Returns:
+        ``len(classes) + 1`` (background is class 0).
+
+    Raises:
+        ValueError: If ``classes`` is missing or empty.
+    """
     if hasattr(dataset, "classes"):
         classes = getattr(dataset, "classes")
         if isinstance(classes, list) and classes:
@@ -39,6 +64,15 @@ def infer_detection_num_classes(dataset: Dataset[Any]) -> int:
 
 
 def adapt_fasterrcnn_heads(model: Module, num_classes: int) -> Module:
+    """Replace Faster R-CNN / Mask R-CNN box predictor for ``num_classes``.
+
+    Args:
+        model: Model with ``roi_heads.box_predictor``.
+        num_classes: Total classes including background.
+
+    Returns:
+        Model with updated ``FastRCNNPredictor``.
+    """
     box_predictor = model.roi_heads.box_predictor
     in_features = box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
@@ -46,6 +80,7 @@ def adapt_fasterrcnn_heads(model: Module, num_classes: int) -> Module:
 
 
 def _first_bn_norm_factory(module: Module) -> Callable[..., nn.Module]:
+    """Return a BatchNorm2d factory matching eps/momentum from ``module``."""
     for m in module.modules():
         if isinstance(m, nn.BatchNorm2d):
             return partial(nn.BatchNorm2d, eps=m.eps, momentum=m.momentum)
@@ -53,6 +88,7 @@ def _first_bn_norm_factory(module: Module) -> Callable[..., nn.Module]:
 
 
 def _retinanet_norm_layer(head: Module) -> Callable[..., nn.Module] | None:
+    """Infer norm layer factory from an existing RetinaNet classification head."""
     cls_head = getattr(head, "classification_head", None)
     if cls_head is None:
         return None
@@ -69,6 +105,7 @@ def _retinanet_norm_layer(head: Module) -> Callable[..., nn.Module] | None:
             def _group_norm_factory(
                 num_channels: int, *, ng: int = num_groups, e: float = eps
             ) -> nn.GroupNorm:
+                """Build a GroupNorm layer matching the template head's hyperparameters."""
                 return nn.GroupNorm(ng, num_channels, eps=e)
 
             return _group_norm_factory
@@ -76,6 +113,7 @@ def _retinanet_norm_layer(head: Module) -> Callable[..., nn.Module] | None:
 
 
 def _fcos_num_convs(head: Module) -> int:
+    """Count conv layers in FCOS classification head (default 4)."""
     cls_head = getattr(head, "classification_head", None)
     conv_seq = getattr(cls_head, "conv", None) if cls_head is not None else None
     if conv_seq is None:
@@ -84,6 +122,20 @@ def _fcos_num_convs(head: Module) -> int:
 
 
 def adapt_torchvision_ssd_heads(model: Module, num_classes: int) -> Module:
+    """Rebuild SSD or SSDLite detection heads for ``num_classes``.
+
+    Args:
+        model: Torchvision ``SSD`` instance.
+        num_classes: Total classes including background.
+
+    Returns:
+        Model with a new ``SSDHead`` or ``SSDLiteHead``.
+
+    Raises:
+        TypeError: If ``model`` is not ``SSD``.
+        ValueError: If ``transform.fixed_size`` is unset.
+        NotImplementedError: For unknown head types.
+    """
     from torchvision.models.detection import _utils as det_utils
     from torchvision.models.detection.ssd import SSD, SSDHead
     from torchvision.models.detection.ssdlite import SSDLiteHead
@@ -116,6 +168,15 @@ def adapt_torchvision_ssd_heads(model: Module, num_classes: int) -> Module:
 
 
 def adapt_torchvision_retinanet_head(model: Module, num_classes: int) -> Module:
+    """Rebuild RetinaNet classification/regression head for ``num_classes``.
+
+    Args:
+        model: Torchvision ``RetinaNet`` instance.
+        num_classes: Total classes including background.
+
+    Returns:
+        Model with a new ``RetinaNetHead``.
+    """
     from torchvision.models.detection.retinanet import RetinaNet, RetinaNetHead
 
     if not isinstance(model, RetinaNet):
@@ -132,6 +193,15 @@ def adapt_torchvision_retinanet_head(model: Module, num_classes: int) -> Module:
 
 
 def adapt_torchvision_fcos_head(model: Module, num_classes: int) -> Module:
+    """Rebuild FCOS head for ``num_classes``.
+
+    Args:
+        model: Torchvision ``FCOS`` instance.
+        num_classes: Total classes including background.
+
+    Returns:
+        Model with a new ``FCOSHead``.
+    """
     from torchvision.models.detection.fcos import FCOS, FCOSHead
 
     if not isinstance(model, FCOS):
@@ -145,7 +215,18 @@ def adapt_torchvision_fcos_head(model: Module, num_classes: int) -> Module:
 
 
 def adapt_detection_model(model: Module, num_classes: int) -> Module:
-    """Подгоняет головы типичных моделей ``torchvision.detection`` под число классов."""
+    """Adapt detection heads for common ``torchvision.detection`` builders.
+
+    Args:
+        model: Detection model (Faster R-CNN, SSD, RetinaNet, FCOS, etc.).
+        num_classes: Total classes including background.
+
+    Returns:
+        Model with heads matching ``num_classes``.
+
+    Raises:
+        NotImplementedError: If the architecture is not recognized.
+    """
     if hasattr(model, "roi_heads"):
         return adapt_fasterrcnn_heads(model, num_classes)
 
@@ -184,7 +265,15 @@ def adapt_detection_model(model: Module, num_classes: int) -> Module:
 
 
 def prepare_detection_model_from_meta(model: Module, *, num_classes: int) -> Module:
-    """Rebuild detection heads using ``num_classes`` (including background)."""
+    """Rebuild detection heads using saved ``num_classes`` (including background).
+
+    Args:
+        model: Base detection model shell.
+        num_classes: Total classes including background.
+
+    Returns:
+        Model with adapted heads.
+    """
     return adapt_detection_model(model, num_classes)
 
 
@@ -193,6 +282,16 @@ def prepare_detection_model(
     train_dataset: Dataset[Any],
     localizer: ImageLocalizer,
 ) -> Module:
+    """Adapt detection model heads from dataset or ``ImageLocalizer`` config.
+
+    Args:
+        model: Base detection model.
+        train_dataset: Training split for class count inference.
+        localizer: Step functor (may fix ``num_classes``).
+
+    Returns:
+        Model with matching detection heads.
+    """
     n_cls = (
         localizer.num_classes
         if localizer.num_classes is not None
@@ -204,11 +303,19 @@ def prepare_detection_model(
 class _TransformedDetectionDataset(
     Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]]
 ):
+    """Apply an optional image-only transform to detection samples."""
+
     def __init__(
         self,
         base: Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]],
         image_transform: Callable[[torch.Tensor], torch.Tensor] | None,
     ) -> None:
+        """Initialize the wrapper.
+
+        Args:
+            base: Dataset yielding ``(image, target)`` tensors.
+            image_transform: Optional transform on the image only (boxes unchanged).
+        """
         self.base = base
         self.image_transform = image_transform
 
@@ -225,12 +332,24 @@ class _TransformedDetectionDataset(
 def detection_train_val_loaders(
     data: SplitData,
     config: TrainingConfig,
-    localizer: ImageLocalizer,
+    *,
+    transforms: DetectionTransforms | None = None,
 ) -> tuple[DataLoader[Any], DataLoader[Any]]:
+    """Build train and validation detection dataloaders.
+
+    Args:
+        data: Train/validation splits.
+        config: Batch size and worker settings.
+        transforms: Optional image-only transforms from :class:`~hyppopipe.train.trainer.Trainer`.
+
+    Returns:
+        Train and validation loaders with ``detection_collate_fn``.
+    """
     train_core = adapt_dataset_for_detection(data.train)
     val_core = adapt_dataset_for_detection(data.val)
-    train_ds = _TransformedDetectionDataset(train_core, localizer.train_transform)
-    val_ds = _TransformedDetectionDataset(val_core, localizer.val_transform)
+    tf = transforms or DetectionTransforms()
+    train_ds = _TransformedDetectionDataset(train_core, tf.train)
+    val_ds = _TransformedDetectionDataset(val_core, tf.val)
 
     pin = torch.cuda.is_available()
     train_loader = DataLoader(
@@ -254,10 +373,18 @@ def detection_train_val_loaders(
 
 
 class DetectionTrainingTask(TrainingTask):
+    """``TrainingTask`` implementation for ``ImageLocalizer`` pipeline steps."""
+
     def __init__(self, localizer: ImageLocalizer) -> None:
+        """Store the localizer step configuration.
+
+        Args:
+            localizer: Pipeline ``ImageLocalizer`` functor for this step.
+        """
         self._localizer = localizer
 
     def inference_meta_from_prepared(self, prepared: Module) -> dict[str, Any]:
+        """Export detection class count from adapted heads."""
         meta: dict[str, Any] = {"task": "detection"}
         if hasattr(prepared, "roi_heads"):
             cls_score = prepared.roi_heads.box_predictor.cls_score
@@ -276,6 +403,7 @@ class DetectionTrainingTask(TrainingTask):
         return meta
 
     def split_lengths(self, data: SplitData) -> tuple[int, int]:
+        """Return lengths after detection dataset adaptation."""
         return (
             len(adapt_dataset_for_detection(data.train)),
             len(adapt_dataset_for_detection(data.val)),
@@ -288,13 +416,25 @@ class DetectionTrainingTask(TrainingTask):
         config: TrainingConfig,
         *,
         weights_enum: Any | None = None,
+        transforms: DetectionTransforms | None = None,
     ) -> tuple[Module, DataLoader[Any], DataLoader[Any]]:
+        """Prepare detection model and dataloaders."""
+        if transforms is not None and not isinstance(transforms, DetectionTransforms):
+            msg = (
+                f"Detection training expects DetectionTransforms or None, "
+                f"got {type(transforms).__name__}"
+            )
+            raise TypeError(msg)
+
         train_det = adapt_dataset_for_detection(data.train)
         prepared = prepare_detection_model(model, train_det, self._localizer)
-        train_ld, val_ld = detection_train_val_loaders(data, config, self._localizer)
+        train_ld, val_ld = detection_train_val_loaders(
+            data, config, transforms=transforms
+        )
         return prepared, train_ld, val_ld
 
     def create_criterion(self, device: torch.device, config: TrainingConfig) -> Module:
+        """Detection loss is computed inside the model; return identity criterion."""
         return torch.nn.Identity().to(device)
 
     def train_batch(
@@ -305,6 +445,7 @@ class DetectionTrainingTask(TrainingTask):
         optimizer: Optimizer,
         device: torch.device,
     ) -> tuple[float, int]:
+        """One detection training step (model returns loss dict)."""
         images, targets = batch
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -324,6 +465,7 @@ class DetectionTrainingTask(TrainingTask):
         criterion: Module,
         device: torch.device,
     ) -> tuple[float, int]:
+        """Validation loss via model forward in train mode (torchvision detection)."""
         images, targets = batch
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]

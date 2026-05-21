@@ -1,15 +1,14 @@
+"""Semantic and instance segmentation step functor."""
+
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Literal
-
-import torch
 
 SegmentationKind = Literal["instance", "semantic"]
 
 
 class ImageSegmentator:
-    """Шаг пайплайна для semantic или instance segmentation."""
+    """Pipeline step for semantic or instance segmentation."""
 
     def __init__(
         self,
@@ -18,23 +17,19 @@ class ImageSegmentator:
         num_classes: int | None = None,
         input_channels: int = 3,
         image_size: tuple[int, int] | None = (224, 224),
-        train_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
-        val_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
-        """
+        """Store segmentation training options.
+
         Args:
-            kind: желаемый **формат разметки** датасета: ``instance`` (таргеты как у
-                Mask R-CNN) или ``semantic`` (class map). Фактическое обучение
-                подстраивается под архитектуру модели: для FCN/DeepLab при
-                ``kind='instance'`` автоматически используются semantic-маски
-                (см. ``SegmentationTrainingTask``).
-            num_classes: число классов включая фон. Если ``None``, берётся из
-                датасета или масок.
-            input_channels: число каналов после дефолтной подготовки semantic inputs.
-            image_size: размер ``(H, W)`` для semantic batching. Для instance
-                segmentation модели torchvision сами ресайзят изображения.
-            train_transform / val_transform: только над изображением; геометрию
-                маски нужно согласовывать в кастомном датасете.
+            kind: Desired **label format**: ``"instance"`` (Mask R-CNN targets) or
+                ``"semantic"`` (class map). Training may adapt when the model architecture
+                differs (see ``SegmentationTrainingTask``).
+            num_classes: Classes including background; inferred from data when None.
+            input_channels: Channel count after default semantic input preparation.
+            image_size: ``(H, W)`` for semantic batching; instance models resize internally.
+
+        Raises:
+            ValueError: If ``kind`` is not ``"instance"`` or ``"semantic"``.
         """
         if kind not in ("instance", "semantic"):
             raise ValueError("kind must be 'instance' or 'semantic'")
@@ -42,7 +37,7 @@ class ImageSegmentator:
         self.num_classes = num_classes
         self.input_channels = input_channels
         self.image_size = image_size
-        self.train_transform = train_transform
-        self.val_transform = val_transform
 
-    def __call__(self) -> None: ...
+    def __call__(self) -> None:
+        """Marker callable; training uses attributes, not runtime invocation."""
+        ...

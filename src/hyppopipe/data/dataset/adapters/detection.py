@@ -1,4 +1,4 @@
-"""Преобразование сплита в ``Dataset`` для задачи детекции."""
+"""Adapt generic dataset splits for detection training."""
 
 from __future__ import annotations
 
@@ -11,11 +11,19 @@ from hyppopipe.data.dataset.readers.yaml_detection_dataset import ConcatDetectio
 
 
 def adapt_dataset_for_detection(ds: Any) -> Dataset[tuple[Any, dict[str, Any]]]:
-    """
-    Возвращает torch-датасет с элементами ``(image_tensor, target_dict)``.
+    """Return a torch dataset yielding ``(image_tensor, target_dict)`` elements.
 
-    Поддерживаются объекты с ``as_detection_dataset()``, ``Subset`` и
-    ``ConcatDataset`` над совместимыми частями.
+    Supports objects with ``as_detection_dataset()``, ``Subset``, and
+    ``ConcatDataset`` over compatible parts.
+
+    Args:
+        ds: Dataset or wrapper to adapt.
+
+    Returns:
+        Detection-ready dataset.
+
+    Raises:
+        DetectionDataUnsupportedError: If the source cannot be converted.
     """
     if isinstance(ds, Subset):
         inner = adapt_dataset_for_detection(cast(Any, ds.dataset))

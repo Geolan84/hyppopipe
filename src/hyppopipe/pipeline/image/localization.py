@@ -1,29 +1,24 @@
+"""Object detection / localization step functor."""
+
 from __future__ import annotations
-
-from typing import Callable
-
-import torch
 
 
 class ImageLocalizer:
-    """Шаг пайплайна для локализации / детекции (обучение через ``DetectionTrainingTask``)."""
+    """Pipeline step for localization and detection (torchvision Faster R-CNN training)."""
 
     def __init__(
         self,
         *,
         num_classes: int | None = None,
-        train_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
-        val_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
-        """
+        """Store detection training options.
+
         Args:
-            num_classes: всего классов **включая фон** для torchvision Faster R-CNN.
-                Если ``None``, берётся ``len(dataset.classes) + 1``.
-            train_transform / val_transform: только над изображением (CHW float);
-                геометрические аугментации нужно согласовывать с bbox самостоятельно.
+            num_classes: Total classes **including background** for torchvision Faster R-CNN.
+                When None, uses ``len(dataset.classes) + 1``.
         """
         self.num_classes = num_classes
-        self.train_transform = train_transform
-        self.val_transform = val_transform
 
-    def __call__(self) -> None: ...
+    def __call__(self) -> None:
+        """Marker callable; training uses attributes, not runtime invocation."""
+        ...

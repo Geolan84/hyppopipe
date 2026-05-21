@@ -1,3 +1,5 @@
+"""Map pipeline step functors to concrete ``TrainingTask`` implementations."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -12,7 +14,17 @@ from hyppopipe.train.tasks.segmentation import SegmentationTrainingTask
 
 
 def dispatch_training_task(step_action: Any) -> TrainingTask:
-    """Resolve the training strategy from the pipeline step functor."""
+    """Select the training strategy for a pipeline step functor.
+
+    Args:
+        step_action: Functor attached to the step (e.g. ``ImageClassifier``).
+
+    Returns:
+        Task instance that implements ``TrainingTask`` for ``step_action``.
+
+    Raises:
+        TypeError: If ``step_action`` is not a supported functor type.
+    """
     match step_action:
         case ImageClassifier():
             return ClassificationTrainingTask(step_action)

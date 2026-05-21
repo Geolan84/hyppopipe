@@ -1,3 +1,9 @@
+"""Abstract training task interface for pipeline step types.
+
+Defines the contract between ``Trainer`` and task-specific implementations
+(classification, detection, segmentation) for data preparation and batch loops.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -10,17 +16,44 @@ from torch.utils.data import DataLoader
 
 from hyppopipe.data.dataset.splits import SplitData
 from hyppopipe.train.config import TrainingConfig
+from hyppopipe.train.objectives import EpochMetric
 
 
 def model_label_for_module(model: Module) -> str:
+    """Return a short human-readable label for a model (typically the class name).
+
+    Args:
+        model: PyTorch module whose type name is used for logging and artifacts.
+
+    Returns:
+        The unqualified class name of ``model``.
+    """
     return model.__class__.__name__
 
 
 class TrainingTask(ABC):
-    """Training task: model/data setup and forward/loss steps for a pipeline step type."""
+    """Training strategy for one pipeline step type.
+
+    Subclasses adapt datasets, rebuild model heads, build dataloaders, and
+    implement train/validation batch steps for a specific task (classification,
+    detection, or segmentation).
+    """
 
     def split_lengths(self, data: SplitData) -> tuple[int, int]:
-        """Размеры train/val после приведения к данным задачи (по умолчанию ``len`` сплита)."""
+        """Return train and validation sample counts after task-specific adaptation.
+
+        Default implementation uses ``len`` on ``data.train`` and ``data.val``.
+        Override when splits are wrapped or filtered before training.
+
+        Args:
+            data: Train/validation (and optionally test) split container.
+
+        Returns:
+            Pair ``(train_size, val_size)``.
+
+        Raises:
+            TypeError: If lengths cannot be computed from the split objects.
+        """
         try:
             return len(data.train), len(data.val)
         except TypeError as e:
@@ -37,12 +70,42 @@ class TrainingTask(ABC):
         config: TrainingConfig,
         *,
         weights_enum: Any | None = None,
+        transforms: Any | None = None,
     ) -> tuple[Module, DataLoader[Any], DataLoader[Any]]:
-        """Return the prepared model and train/val dataloaders."""
+        """Prepare the model and train/validation dataloaders.
+
+        Args:
+            model: Base model (often from a torchvision factory).
+            data: Dataset splits for training and validation.
+            config: Hyperparameters (batch size, workers, etc.).
+            weights_enum: Optional pretrained ``WeightsEnum`` for architecture hints.
+            transforms: Optional task-specific transforms from :class:`~hyppopipe.train.trainer.Trainer`.
+
+        Returns:
+            Tuple of prepared model, train loader, and validation loader.
+        """
 
     @abstractmethod
     def create_criterion(self, device: torch.device, config: TrainingConfig) -> Module:
-        """Loss module on ``device`` (may depend on task and config)."""
+        """Build the default loss module for this task on ``device``.
+
+        Args:
+            device: Target device for loss tensors.
+            config: Training configuration (may select loss type).
+
+        Returns:
+            Loss module moved to ``device``.
+        """
+
+    def update_monitor(
+        self,
+        metric: EpochMetric,
+        model: Module,
+        batch: Any,
+        device: torch.device,
+    ) -> None:
+        """Update a validation metric from one batch (override per task)."""
+        del metric, model, batch, device
 
     @abstractmethod
     def train_batch(
@@ -53,7 +116,18 @@ class TrainingTask(ABC):
         optimizer: Optimizer,
         device: torch.device,
     ) -> tuple[float, int]:
-        """One training batch: backward + optimizer step. Returns (loss sum, sample count)."""
+        """Run one training step (forward, backward, optimizer step).
+
+        Args:
+            model: Model in training mode.
+            batch: Task-specific batch from the dataloader.
+            criterion: Loss module from ``create_criterion``.
+            optimizer: Optimizer for ``model`` parameters.
+            device: Device for inputs and computation.
+
+        Returns:
+            Weighted loss sum (``loss.item() * batch_size``) and sample count.
+        """
 
     @abstractmethod
     def eval_batch(
@@ -63,8 +137,28 @@ class TrainingTask(ABC):
         criterion: Module,
         device: torch.device,
     ) -> tuple[float, int]:
-        """One validation batch without gradients."""
+        """Run one validation step without parameter updates.
+
+        Args:
+            model: Model (eval or train mode per task requirements).
+            batch: Task-specific batch from the validation loader.
+            criterion: Loss module from ``create_criterion``.
+            device: Device for inputs and computation.
+
+        Returns:
+            Weighted loss sum and sample count, same convention as ``train_batch``.
+        """
 
     def inference_meta_from_prepared(self, prepared: Module) -> dict[str, Any]:
-        """Metadata needed to rebuild ``prepared`` for inference (after ``prepare``)."""
+        """Collect metadata needed to rebuild ``prepared`` at inference time.
+
+        Called after ``prepare`` so exported bundles can restore head sizes,
+        transforms, and task-specific options.
+
+        Args:
+            prepared: Model returned from ``prepare``.
+
+        Returns:
+            JSON-serializable metadata dict; empty by default.
+        """
         return {}

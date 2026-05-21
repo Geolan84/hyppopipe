@@ -1,4 +1,4 @@
-"""Преобразование сплита в ``Dataset`` для задачи сегментации."""
+"""Adapt generic dataset splits for segmentation training."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ SegmentationKind = Literal["instance", "semantic"]
 def _call_as_segmentation_dataset(
     ds: Any, kind: SegmentationKind
 ) -> Dataset[Any] | None:
+    """Invoke ``as_segmentation_dataset`` when present, honoring optional ``kind``."""
     if not hasattr(ds, "as_segmentation_dataset"):
         return None
 
@@ -44,12 +45,21 @@ def adapt_dataset_for_segmentation(
     *,
     kind: SegmentationKind,
 ) -> Dataset[Any]:
-    """
-    Возвращает torch-датасет для сегментации.
+    """Return a torch dataset for instance or semantic segmentation.
 
-    ``kind="instance"`` ожидает элементы ``(image, target_dict)`` с
-    ``boxes``, ``labels`` и ``masks``. ``kind="semantic"`` ожидает
+    For ``kind="instance"``, elements are ``(image, target_dict)`` with
+    ``boxes``, ``labels``, and ``masks``. For ``kind="semantic"``, elements are
     ``(image, class_map)``.
+
+    Args:
+        ds: Dataset or wrapper to adapt.
+        kind: Target segmentation label format.
+
+    Returns:
+        Segmentation-ready dataset.
+
+    Raises:
+        SegmentationDataUnsupportedError: If the source cannot be converted.
     """
     if isinstance(ds, Subset):
         inner = adapt_dataset_for_segmentation(cast(Any, ds.dataset), kind=kind)

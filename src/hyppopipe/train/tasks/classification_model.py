@@ -1,3 +1,9 @@
+"""Adapt torchvision classification backbones for custom classes and channel counts.
+
+Locates stem convolutions and classification heads across common architectures
+(ResNet, ViT, EfficientNet-style) and rebuilds them for training and inference.
+"""
+
 from __future__ import annotations
 
 import torch
@@ -7,6 +13,18 @@ from torch.nn import Conv2d
 
 
 def _resize_conv1_in_channels(weight: Tensor, new_in: int) -> Tensor:
+    """Resample convolution weights when changing the input channel count.
+
+    Fewer channels: average old channels into buckets. More channels: pick
+    representative source channels by uniform indexing.
+
+    Args:
+        weight: 4D conv weight ``(out_ch, in_ch, kh, kw)``.
+        new_in: Target input channel count.
+
+    Returns:
+        Resized weight tensor of shape ``(out_ch, new_in, kh, kw)``.
+    """
     old_in = weight.shape[1]
     if old_in == new_in:
         return weight.clone()
@@ -34,6 +52,14 @@ def _resize_conv1_in_channels(weight: Tensor, new_in: int) -> Tensor:
 
 
 def find_stem_conv(model: Module) -> Conv2d | None:
+    """Find the first stem ``Conv2d`` in common torchvision classifiers.
+
+    Args:
+        model: Classification backbone.
+
+    Returns:
+        Stem convolution if found (``conv1``, ``conv_proj``, or first in ``features``).
+    """
     conv1 = getattr(model, "conv1", None)
     if isinstance(conv1, Conv2d):
         return conv1
@@ -53,6 +79,14 @@ def find_stem_conv(model: Module) -> Conv2d | None:
 
 
 def classifier_output_features(model: Module) -> int | None:
+    """Return the number of logits from the classification head, if detectable.
+
+    Args:
+        model: Classification backbone.
+
+    Returns:
+        Output feature size, or ``None`` if no known head layout is found.
+    """
     fc = getattr(model, "fc", None)
     if isinstance(fc, Linear):
         return int(fc.out_features)
@@ -72,11 +106,25 @@ def classifier_output_features(model: Module) -> int | None:
 
 
 def _replace_linear(linear: Linear, num_classes: int) -> Linear:
+    """Create a new ``Linear`` with the same input size and new output size."""
     return Linear(int(linear.in_features), num_classes)
 
 
 def adapt_classifier_backbone(model: Module, num_classes: int) -> Module:
-    """Replace the classification head for common torchvision architectures."""
+    """Replace the classification head for common torchvision architectures.
+
+    Supports ``fc``, ``classifier`` (Linear or Sequential), and ViT ``heads.head``.
+
+    Args:
+        model: Classification backbone.
+        num_classes: Number of output classes (logits).
+
+    Returns:
+        The same ``model`` instance with an updated head.
+
+    Raises:
+        NotImplementedError: If no supported head attribute is found.
+    """
     current = classifier_output_features(model)
     if current == num_classes:
         return model
@@ -114,6 +162,15 @@ def adapt_classifier_backbone(model: Module, num_classes: int) -> Module:
 
 
 def adapt_classifier_input_channels(model: Module, in_channels: int) -> Module:
+    """Replace the stem convolution when input channel count differs from pretrained.
+
+    Args:
+        model: Classification backbone.
+        in_channels: Expected input channels (e.g. 1 for grayscale, 3 for RGB).
+
+    Returns:
+        The same ``model`` instance, possibly with a new stem ``Conv2d``.
+    """
     stem = find_stem_conv(model)
     if stem is None:
         return model
@@ -149,6 +206,14 @@ def adapt_classifier_input_channels(model: Module, in_channels: int) -> Module:
 
 
 def stem_input_channels(model: Module) -> int | None:
+    """Return stem input channel count if a stem conv is found.
+
+    Args:
+        model: Classification backbone.
+
+    Returns:
+        ``in_channels`` of the stem conv, or ``None``.
+    """
     stem = find_stem_conv(model)
     if stem is None:
         return None
@@ -161,5 +226,15 @@ def prepare_classification_model_from_meta(
     num_classes: int,
     canonical_in_channels: int,
 ) -> Module:
+    """Rebuild stem and head from saved inference metadata.
+
+    Args:
+        model: Base model shell before ``load_state_dict``.
+        num_classes: Target number of classes.
+        canonical_in_channels: Target input channel count.
+
+    Returns:
+        Model with adapted stem and classification head.
+    """
     model = adapt_classifier_input_channels(model, canonical_in_channels)
     return adapt_classifier_backbone(model, num_classes)

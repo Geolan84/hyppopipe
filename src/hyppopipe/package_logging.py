@@ -1,3 +1,5 @@
+"""Centralized logging configuration for the hyppopipe package."""
+
 from __future__ import annotations
 
 import logging
@@ -18,6 +20,8 @@ _explicit_package_logging: bool = False
 
 @dataclass(frozen=True, slots=True)
 class LogConfig:
+    """Per-run logging options for :func:`run_logging`."""
+
     level: int = logging.INFO
     console: bool = True
     file: Path | str | None = None
@@ -26,12 +30,14 @@ class LogConfig:
 
 
 def _coerce_log_config(log: Path | str | LogConfig) -> LogConfig:
+    """Normalize a path or config into :class:`LogConfig`."""
     if isinstance(log, LogConfig):
         return log
     return LogConfig(file=log, console=False)
 
 
 def _formatter(*, fmt: str, datefmt: str) -> logging.Formatter:
+    """Build a :class:`logging.Formatter` with the given format strings."""
     return logging.Formatter(fmt=fmt, datefmt=datefmt)
 
 
@@ -41,6 +47,7 @@ def _attach_handlers(
     *,
     level: int,
 ) -> None:
+    """Register handlers on ``log`` and disable propagation to the root logger."""
     for handler in handlers:
         handler.setLevel(level)
         log.addHandler(handler)
@@ -57,6 +64,7 @@ def _build_handlers(
     log_file: Path | str | None,
     console: bool,
 ) -> list[logging.Handler]:
+    """Create stderr and/or file handlers for a logging run."""
     formatter = _formatter(fmt=fmt, datefmt=datefmt)
     handlers: list[logging.Handler] = []
     if console:
@@ -80,8 +88,7 @@ def ensure_default_logging(
     *,
     stream: TextIO | None = None,
 ) -> None:
-    """
-    If the package logger has no handlers, attach a stderr handler once.
+    """If the package logger has no handlers, attach a stderr handler once.
 
     Does nothing after :func:`configure_logging` has been called (explicit
     configuration replaces the default).
@@ -117,8 +124,7 @@ def configure_logging(
     console: bool = True,
     force: bool = False,
 ) -> None:
-    """
-    Attach handlers on the ``hyppopipe`` logger (stderr and/or file).
+    """Attach handlers on the ``hyppopipe`` logger (stderr and/or file).
 
     Call this once to take over logging for the package; automatic setup in
     :func:`ensure_default_logging` is then skipped.
@@ -151,8 +157,7 @@ def configure_logging(
 
 @contextmanager
 def run_logging(log: Path | str | LogConfig | None = None) -> Iterator[None]:
-    """
-    Per-run logging for training or other jobs.
+    """Per-run logging for training or other jobs.
 
     * ``None`` — same as :func:`ensure_default_logging` for this block.
     * path — write only to that file (no console) for the block.

@@ -1,3 +1,5 @@
+"""Prediction result types returned by :func:`~hyppopipe.inference.run.run_step_inference`."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,6 +17,7 @@ _BACKGROUND_CLASS_NAMES = {"background", "__background__", "bg"}
 
 
 def _image_to_display_array(image: Image) -> np.ndarray[Any, Any]:
+    """Convert an :class:`~hyppopipe.data.image.Image` to an HWC or 2D numpy array for plotting."""
     x = image.body.detach().cpu()
     if x.ndim == 2:
         return x.numpy()
@@ -26,6 +29,7 @@ def _image_to_display_array(image: Image) -> np.ndarray[Any, Any]:
 
 
 def _resolve_class_name(label: int, class_names: list[str] | None) -> str:
+    """Map a numeric label to a display string using optional class names."""
     if not class_names:
         return f"class {label}"
 
@@ -41,7 +45,7 @@ def _resolve_class_name(label: int, class_names: list[str] | None) -> str:
 
 @dataclass(slots=True)
 class LocalizationPrediction:
-    """Выход шага детекции: сырые предсказания и ROI для следующего шага."""
+    """Detection output: raw tensors and an ROI image for downstream steps."""
 
     detections: dict[str, Tensor]
     crop: Image
@@ -65,7 +69,21 @@ class LocalizationPrediction:
         ax: Any | None = None,
         **kwargs: Any,
     ) -> None:
-        """Показывает исходное изображение с bbox, классами и confidence."""
+        """Draw bounding boxes (and optional labels/scores) on the source image.
+
+        Args:
+            image: Image to display; defaults to ``source_image``.
+            score_thresh: Override instance threshold for filtering boxes.
+            top_k: Keep at most this many boxes (by score when available).
+            show_labels: Draw class names when labels are present.
+            show_scores: Draw confidence scores.
+            class_names: Override ``self.class_names`` for labels.
+            color: Box and label background color.
+            linewidth: Rectangle edge width.
+            figsize: Matplotlib figure size when ``ax`` is None.
+            ax: Existing axes; a new figure is created when None.
+            **kwargs: Forwarded to :func:`matplotlib.pyplot.show`.
+        """
         image_to_show = image or self.source_image
         if image_to_show is None:
             msg = (
@@ -153,7 +171,7 @@ class LocalizationPrediction:
 
 @dataclass(slots=True)
 class ClassificationPrediction:
-    """Выход классификации."""
+    """Classification logits, probabilities, and resolved label."""
 
     logits: Tensor
     probs: Tensor
@@ -163,7 +181,7 @@ class ClassificationPrediction:
 
 @dataclass(slots=True)
 class SegmentationPrediction:
-    """Выход сегментации: semantic class-map или instance masks."""
+    """Segmentation output: semantic class map or instance masks."""
 
     kind: str
     masks: Tensor
@@ -184,6 +202,16 @@ class SegmentationPrediction:
         ax: Any | None = None,
         **kwargs: Any,
     ) -> None:
+        """Overlay segmentation masks on the source image.
+
+        Args:
+            image: Base image; defaults to ``source_image``.
+            score_thresh: For instance masks, minimum score to display.
+            alpha: Mask overlay opacity.
+            figsize: Matplotlib figure size when ``ax`` is None.
+            ax: Existing axes; a new figure is created when None.
+            **kwargs: Forwarded to :func:`matplotlib.pyplot.show`.
+        """
         image_to_show = image or self.source_image
         if image_to_show is None:
             msg = "SegmentationPrediction.show() requires image=... when source image is absent"
@@ -225,6 +253,6 @@ class SegmentationPrediction:
 
 @dataclass(slots=True)
 class PipelinePrediction:
-    """Результат ``Pipeline.predict``: значения по именам шагов."""
+    """Result of :meth:`~hyppopipe.pipeline.pipeline.Pipeline.predict` keyed by step name."""
 
     outputs: dict[str, Any]

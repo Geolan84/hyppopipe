@@ -1,3 +1,9 @@
+"""Classification training task: datasets, model prep, and batch loops.
+
+Wires ``ImageClassifier`` pipeline steps to ``Trainer`` via ``ClassificationTrainingTask``,
+including ROI vs full-image modes and transform spec export for inference.
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -17,6 +23,7 @@ from hyppopipe.data.dataset.splits import SplitData
 from hyppopipe.data.image import Image
 from hyppopipe.pipeline.image.classification import ImageClassifier
 from hyppopipe.train.config import TrainingConfig
+from hyppopipe.train.objectives import EpochMetric
 from hyppopipe.train.tasks.base import TrainingTask
 from hyppopipe.train.tasks.classification_model import (
     adapt_classifier_backbone,
@@ -25,12 +32,13 @@ from hyppopipe.train.tasks.classification_model import (
     stem_input_channels,
 )
 from hyppopipe.train.tasks.classification_transforms import (
-    classification_transform_from_spec,
-    classification_transforms_for_weights,
-    default_transform_spec,
     ensure_channel_count,
     normalize_tensor_imagenet_style,
-    transform_spec_from_weights,
+)
+from hyppopipe.train.transforms import (
+    ClassificationTransforms,
+    classification_transform_spec_for_inference,
+    coerce_classification_transform_fn,
 )
 
 _ensure_channel_count = ensure_channel_count
@@ -38,11 +46,19 @@ _normalize_tensor_imagenet_style = normalize_tensor_imagenet_style
 
 
 class _ImageTensorDataset(Dataset[tuple[torch.Tensor, int]]):
+    """Wrap a label dataset and apply a per-sample tensor transform."""
+
     def __init__(
         self,
         base: Dataset[tuple[Any, int]],
         transform: transforms.Compose | Any,
     ):
+        """Initialize the wrapper.
+
+        Args:
+            base: Dataset yielding ``(image, label)`` with ``Image`` or ``Tensor``.
+            transform: Callable applied to the image tensor before return.
+        """
         self.base = base
         self.transform = transform
 
@@ -64,6 +80,21 @@ def infer_canonical_input_channels(
     *,
     max_samples: int = 16384,
 ) -> int:
+    """Infer maximum channel count over a sample of the dataset.
+
+    Scans up to ``max_samples`` items and returns the max ``C`` in CHW tensors.
+
+    Args:
+        dataset: Dataset whose items are ``(image, label)``.
+        max_samples: Upper bound on items to scan.
+
+    Returns:
+        Maximum channel dimension observed.
+
+    Raises:
+        ValueError: If the dataset is empty or tensors are not CHW.
+        TypeError: If images are neither ``Image`` nor ``Tensor``.
+    """
     n = len(dataset)
     if n == 0:
         msg = "Cannot infer input channels from an empty dataset"
@@ -87,6 +118,7 @@ def _classification_core_splits(
     data: SplitData,
     classifier: ImageClassifier,
 ) -> tuple[Dataset[Any], Dataset[Any]]:
+    """Adapt train/val splits for full-image or ROI classification."""
     if classifier.source_mode == "roi":
         return (
             adapt_split_for_roi_classification(data.train),
@@ -99,6 +131,17 @@ def _classification_core_splits(
 
 
 def infer_num_classes(dataset: Dataset[Any]) -> int:
+    """Infer number of classes from ``dataset.classes`` or label values.
+
+    Args:
+        dataset: Classification dataset.
+
+    Returns:
+        Number of classes (``len(classes)`` or ``max(label) + 1``).
+
+    Raises:
+        ValueError: If classes cannot be inferred reliably from a large dataset.
+    """
     if hasattr(dataset, "classes"):
         classes = getattr(dataset, "classes")
         if isinstance(classes, list):
@@ -124,6 +167,17 @@ def prepare_classification_model(
     *,
     in_channels: int | None = None,
 ) -> Module:
+    """Adapt stem channels and classification head for the training dataset.
+
+    Args:
+        model: Base classifier backbone.
+        train_dataset: Training split used to infer classes and channels.
+        classifier: Step functor (may fix ``num_classes``).
+        in_channels: Optional override for input channel count.
+
+    Returns:
+        Model with matching stem and ``num_classes`` output logits.
+    """
     num_classes = (
         classifier.num_classes
         if classifier.num_classes is not None
@@ -138,15 +192,43 @@ def prepare_classification_model(
     return adapt_classifier_backbone(model, num_classes)
 
 
+def _resolve_classification_transforms(
+    transforms: ClassificationTransforms | None,
+    *,
+    weights: WeightsEnum | None,
+    canonical_channels: int,
+) -> ClassificationTransforms:
+    if transforms is not None:
+        return transforms
+    if weights is not None:
+        return ClassificationTransforms.from_weights(
+            weights, canonical_channels=canonical_channels
+        )
+    return ClassificationTransforms.default(canonical_channels=canonical_channels)
+
+
 def classification_train_val_loaders(
     data: SplitData,
     config: TrainingConfig,
     classifier: ImageClassifier,
     *,
     canonical_channels: int | None = None,
-    transform_spec: dict[str, Any] | None = None,
+    transforms: ClassificationTransforms | None = None,
     weights: WeightsEnum | None = None,
 ) -> tuple[DataLoader[Any], DataLoader[Any]]:
+    """Build train and validation dataloaders for classification.
+
+    Args:
+        data: Train/validation splits.
+        config: Batch size, workers, and related settings.
+        classifier: Step functor (ROI mode and class count).
+        canonical_channels: Channel count for transforms; inferred if ``None``.
+        transforms: Train/val transforms from :class:`~hyppopipe.train.trainer.Trainer`.
+        weights: Optional ``WeightsEnum`` when transforms are not set explicitly.
+
+    Returns:
+        Train and validation ``DataLoader`` instances.
+    """
     train_core, val_core = _classification_core_splits(data, classifier)
     cc = canonical_channels
     if cc is None:
@@ -155,34 +237,23 @@ def classification_train_val_loaders(
             infer_canonical_input_channels(val_core),
         )
 
-    if classifier.train_transform is not None:
-        train_tf = classifier.train_transform
-    elif weights is not None:
-        train_tf, _, _ = classification_transforms_for_weights(
-            weights, canonical_channels=cc
-        )
-    else:
-        train_tf = classification_transform_from_spec(
-            transform_spec,
-            canonical_channels=cc,
-            train=True,
-        )
+    resolved = _resolve_classification_transforms(
+        transforms, weights=weights, canonical_channels=cc
+    )
+    crop_size = int((resolved.transform_spec or {}).get("crop_size", 224))
+    train_fn = coerce_classification_transform_fn(
+        resolved.train,
+        canonical_channels=cc,
+        image_size=crop_size,
+    )
+    val_fn = coerce_classification_transform_fn(
+        resolved.val,
+        canonical_channels=cc,
+        image_size=crop_size,
+    )
 
-    if classifier.val_transform is not None:
-        val_tf = classifier.val_transform
-    elif weights is not None:
-        _, val_tf, _ = classification_transforms_for_weights(
-            weights, canonical_channels=cc
-        )
-    else:
-        val_tf = classification_transform_from_spec(
-            transform_spec,
-            canonical_channels=cc,
-            train=False,
-        )
-
-    train_ds = _ImageTensorDataset(train_core, train_tf)
-    val_ds = _ImageTensorDataset(val_core, val_tf)
+    train_ds = _ImageTensorDataset(train_core, train_fn)
+    val_ds = _ImageTensorDataset(val_core, val_fn)
 
     pin = torch.cuda.is_available()
     train_loader = DataLoader(
@@ -203,11 +274,20 @@ def classification_train_val_loaders(
 
 
 class ClassificationTrainingTask(TrainingTask):
+    """``TrainingTask`` implementation for ``ImageClassifier`` pipeline steps."""
+
     def __init__(self, classifier: ImageClassifier) -> None:
+        """Store the classifier step configuration.
+
+        Args:
+            classifier: Pipeline ``ImageClassifier`` functor for this step.
+        """
         self._classifier = classifier
         self._transform_spec: dict[str, Any] | None = None
+        self._resolved_transforms: ClassificationTransforms | None = None
 
     def inference_meta_from_prepared(self, prepared: Module) -> dict[str, Any]:
+        """Export class count, channels, and transform spec for inference."""
         meta: dict[str, Any] = {"task": "classification"}
         out_features = classifier_output_features(prepared)
         if out_features is not None:
@@ -220,6 +300,7 @@ class ClassificationTrainingTask(TrainingTask):
         return meta
 
     def split_lengths(self, data: SplitData) -> tuple[int, int]:
+        """Return lengths after ROI or classification dataset adaptation."""
         train_core, val_core = _classification_core_splits(data, self._classifier)
         return len(train_core), len(val_core)
 
@@ -230,23 +311,33 @@ class ClassificationTrainingTask(TrainingTask):
         config: TrainingConfig,
         *,
         weights_enum: WeightsEnum | None = None,
+        transforms: ClassificationTransforms | None = None,
     ) -> tuple[Module, DataLoader[Any], DataLoader[Any]]:
+        """Prepare model, dataloaders, and persisted transform spec."""
+        if transforms is not None and not isinstance(
+            transforms, ClassificationTransforms
+        ):
+            msg = (
+                f"Classification training expects ClassificationTransforms or None, "
+                f"got {type(transforms).__name__}"
+            )
+            raise TypeError(msg)
+
         train_cls, val_cls = _classification_core_splits(data, self._classifier)
         canonical_c = max(
             infer_canonical_input_channels(train_cls),
             infer_canonical_input_channels(val_cls),
         )
-        if weights_enum is not None:
-            self._transform_spec = transform_spec_from_weights(weights_enum)
-        elif (
-            self._classifier.train_transform is None
-            and self._classifier.val_transform is None
-        ):
-            self._transform_spec = default_transform_spec(
-                canonical_channels=canonical_c
-            )
-        else:
-            self._transform_spec = None
+        self._resolved_transforms = _resolve_classification_transforms(
+            transforms,
+            weights=weights_enum,
+            canonical_channels=canonical_c,
+        )
+        self._transform_spec = classification_transform_spec_for_inference(
+            self._resolved_transforms,
+            weights_enum=weights_enum,
+            canonical_channels=canonical_c,
+        )
 
         prepared = prepare_classification_model(
             model,
@@ -259,13 +350,29 @@ class ClassificationTrainingTask(TrainingTask):
             config,
             self._classifier,
             canonical_channels=canonical_c,
-            transform_spec=self._transform_spec,
+            transforms=self._resolved_transforms,
             weights=weights_enum,
         )
         return prepared, train_ld, val_ld
 
     def create_criterion(self, device: torch.device, config: TrainingConfig) -> Module:
+        """Return the default cross-entropy loss on ``device``."""
         return config.default_classification_loss().to(device)
+
+    def update_monitor(
+        self,
+        metric: EpochMetric,
+        model: Module,
+        batch: Any,
+        device: torch.device,
+    ) -> None:
+        """Accumulate classification metric from one validation batch."""
+        x, y = batch
+        x = x.to(device)
+        y = y.to(device)
+        with torch.no_grad():
+            logits = model(x)
+        metric.update(logits, y)
 
     def train_batch(
         self,
@@ -275,6 +382,7 @@ class ClassificationTrainingTask(TrainingTask):
         optimizer: Optimizer,
         device: torch.device,
     ) -> tuple[float, int]:
+        """Forward, backward, and optimizer step for one classification batch."""
         x, y = batch
         x = x.to(device)
         y = y.to(device)
@@ -293,6 +401,7 @@ class ClassificationTrainingTask(TrainingTask):
         criterion: Module,
         device: torch.device,
     ) -> tuple[float, int]:
+        """Validation forward pass without parameter updates."""
         x, y = batch
         x = x.to(device)
         y = y.to(device)

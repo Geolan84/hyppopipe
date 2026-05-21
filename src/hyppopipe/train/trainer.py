@@ -1,3 +1,5 @@
+"""Orchestrates model training for a single pipeline step."""
+
 from __future__ import annotations
 
 import logging
@@ -17,7 +19,13 @@ from hyppopipe.pipeline.step import Step
 from hyppopipe.train.config import TrainingConfig, apply_seed, resolve_device
 from hyppopipe.train.early_stopping import EarlyStopping
 from hyppopipe.train.model_spec import model_spec_from_module
-from hyppopipe.train.result import ModelRunResult, StepTrainResult
+from hyppopipe.train.objectives import (
+    EpochMetric,
+    LossFactory,
+    MonitorSpec,
+    resolve_loss,
+)
+from hyppopipe.train.result import ModelRunResult, RunHistory, StepTrainResult
 from hyppopipe.train.tasks import (
     TrainingTask,
     dispatch_training_task,
@@ -28,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 
 class ModelCandidate:
+    """Torchvision model factory evaluated with one or more pretrained weight enums."""
+
     __slots__ = ("model", "weights")
 
     def __init__(
@@ -35,6 +45,12 @@ class ModelCandidate:
         model: Callable[..., Module],
         weights: WeightsEnum | Sequence[WeightsEnum],
     ):
+        """Register a factory and its weight variants to train sequentially.
+
+        Args:
+            model: Callable such as ``torchvision.models.resnet50`` accepting ``weights=``.
+            weights: Single enum or sequence of enums passed to ``model``.
+        """
         self.model = model
         if isinstance(weights, list | tuple):
             self.weights = list(weights)
@@ -42,6 +58,7 @@ class ModelCandidate:
             self.weights = [weights]
 
     def iter_models(self) -> Iterator[tuple[str, Module, WeightsEnum]]:
+        """Yield ``(label, model, weights_enum)`` for each weight variant."""
         for w in self.weights:
             m = self.model(weights=w)
             wname = getattr(w, "name", None) or str(w).split(".")[-1]
@@ -52,6 +69,15 @@ class ModelCandidate:
 def model_spec_from_candidate_weights(
     candidate: ModelCandidate, *, weights_member: WeightsEnum
 ) -> dict[str, Any]:
+    """Build a serializable spec for a torchvision factory + weights pair.
+
+    Args:
+        candidate: Source factory wrapper.
+        weights_member: The weights enum member used for this run.
+
+    Returns:
+        Dict with ``kind``, ``factory``, and ``weights_enum`` keys.
+    """
     factory = candidate.model
     weights_fqn = (
         f"{weights_member.__class__.__module__}."
@@ -65,17 +91,44 @@ def model_spec_from_candidate_weights(
 
 
 class Trainer:
+    """Trains one or more models for a pipeline step action.
+
+    Example:
+        Train a classification step on a split dataset::
+
+            trainer = Trainer([resnet50], data=splits, config=TrainingConfig(epochs=5))
+            step_result = trainer.train(step=classify_step, step_name="classify")
+    """
+
     def __init__(
         self,
         model_candidates: Sequence[Module | ModelCandidate],
         data: SplitData | None = None,
         *,
         config: TrainingConfig | None = None,
+        transforms: Any | None = None,
+        loss: LossFactory | None = None,
+        monitor: MonitorSpec | None = None,
         ignore_fails: bool = False,
     ):
+        """Configure models and defaults for :meth:`train`.
+
+        Args:
+            model_candidates: Ready modules and/or :class:`ModelCandidate` factories.
+            data: Optional default :class:`~hyppopipe.data.dataset.splits.SplitData`.
+            config: Training hyperparameters; defaults to a new :class:`TrainingConfig`.
+            transforms: Task-specific train/val data transforms (see ``hyppopipe.train.transforms``).
+            loss: Loss override; falls back to ``config.loss``, then the task default.
+            monitor: Validation monitor for early stopping; falls back to ``config.monitor``,
+                then validation loss (minimize).
+            ignore_fails: If True, log and skip failed candidates instead of raising.
+        """
         self.model_candidates = model_candidates
         self.data = data
         self.config = config if config is not None else TrainingConfig()
+        self.transforms = transforms
+        self.loss = loss
+        self.monitor = monitor
         self.ignore_fails = ignore_fails
 
     def train(
@@ -86,6 +139,20 @@ class Trainer:
         config: TrainingConfig | None = None,
         log_to: Path | str | LogConfig | None = None,
     ) -> StepTrainResult:
+        """Train all model candidates for one pipeline step.
+
+        Args:
+            step: Step whose ``action`` selects the :class:`~hyppopipe.train.tasks.base.TrainingTask`.
+            step_name: Key used in logs and result artifacts.
+            config: Optional override of ``self.config`` for this call.
+            log_to: Per-run logging configuration.
+
+        Returns:
+            One :class:`~hyppopipe.train.result.ModelRunResult` per successful candidate.
+
+        Raises:
+            ValueError: If no training data is available.
+        """
         if self.data is None:
             raise ValueError("Training is impossible without splitted data")
 
@@ -96,6 +163,7 @@ class Trainer:
             return self._train_step(step=step, step_name=step_name)
 
     def _train_step(self, *, step: Step, step_name: str) -> StepTrainResult:
+        """Run training for every candidate on ``step.action``."""
         apply_seed(self.config.seed)
         task = dispatch_training_task(step.action)
 
@@ -165,6 +233,7 @@ class Trainer:
         model_spec: dict[str, Any],
         weights_enum: WeightsEnum | None = None,
     ) -> ModelRunResult:
+        """Train a single model through epochs with optional early stopping."""
         assert self.data is not None
         device = resolve_device(self.config.device)
         run_t0 = time.perf_counter()
@@ -174,10 +243,22 @@ class Trainer:
             self.data,
             self.config,
             weights_enum=weights_enum,
+            transforms=self.transforms,
         )
         inference_meta = task.inference_meta_from_prepared(prepared)
         prepared = prepared.to(device)
-        criterion = task.create_criterion(device, self.config)
+        loss_spec = self.loss if self.loss is not None else self.config.loss
+        criterion = resolve_loss(
+            loss_spec,
+            device,
+            self.config,
+            default=task.create_criterion,
+        )
+        monitor_spec = self.monitor if self.monitor is not None else self.config.monitor
+        val_metric: EpochMetric | None = (
+            monitor_spec.factory() if monitor_spec is not None else None
+        )
+        checkpoint_mode = monitor_spec.mode if monitor_spec is not None else "min"
         optimizer = self.config.build_optimizer(prepared.parameters())
 
         es_cfg = self.config.early_stopping
@@ -198,21 +279,26 @@ class Trainer:
                 verbose=es_cfg.verbose,
                 save_path=ckpt_path,
                 save_to_disk=es_cfg.save_to_disk,
+                mode=checkpoint_mode,
             )
 
         best_val = float("inf")
+        best_monitor: float | None = None
         train_last = 0.0
         val_last = 0.0
+        monitor_last: float | None = None
         epochs_ran = 0
         stopped_early = False
+        history = RunHistory()
 
         logger.info(
-            "Step %r model %r: training on %s (%d epochs, early_stopping=%s)",
+            "Step %r model %r: training on %s (%d epochs, early_stopping=%s, monitor=%s)",
             step_name,
             model_label,
             device,
             self.config.epochs,
             "on" if early is not None else "off",
+            monitor_spec.name if monitor_spec is not None else "val_loss",
         )
 
         epoch_pbar = tqdm(
@@ -234,7 +320,7 @@ class Trainer:
                 epoch=epochs_ran,
                 total_epochs=self.config.epochs,
             )
-            val_last = self._run_epoch_eval(
+            val_last, monitor_last = self._run_epoch_eval(
                 prepared,
                 val_loader,
                 task,
@@ -242,42 +328,80 @@ class Trainer:
                 device,
                 epoch=epochs_ran,
                 total_epochs=self.config.epochs,
+                val_metric=val_metric,
             )
             best_val = min(best_val, val_last)
-            epoch_dt = time.perf_counter() - epoch_t0
-            epoch_pbar.set_postfix(
-                train=f"{train_last:.4f}",
-                val=f"{val_last:.4f}",
-                t=f"{epoch_dt:.1f}s",
+            checkpoint_score = (
+                monitor_last
+                if val_metric is not None and monitor_last is not None
+                else val_last
             )
+            if monitor_last is not None:
+                if checkpoint_mode == "max":
+                    best_monitor = (
+                        monitor_last
+                        if best_monitor is None
+                        else max(best_monitor, monitor_last)
+                    )
+                else:
+                    best_monitor = (
+                        monitor_last
+                        if best_monitor is None
+                        else min(best_monitor, monitor_last)
+                    )
+            history.append_epoch(
+                epochs_ran,
+                train_loss=train_last,
+                val_loss=val_last,
+                monitor=monitor_last,
+            )
+            epoch_dt = time.perf_counter() - epoch_t0
+            postfix: dict[str, str] = {
+                "train": f"{train_last:.4f}",
+                "val": f"{val_last:.4f}",
+                "t": f"{epoch_dt:.1f}s",
+            }
+            if monitor_last is not None and monitor_spec is not None:
+                postfix[monitor_spec.name] = f"{monitor_last:.4f}"
+            epoch_pbar.set_postfix(**postfix)
 
             stop_now = False
             if early is not None:
-                stop_now = early(prepared, val_last)
-                best_display = early.best_loss
+                stop_now = early(prepared, checkpoint_score)
+                best_display = early.best_score
             else:
-                best_display = best_val
+                best_display = checkpoint_score
 
+            log_monitor = (
+                f" {monitor_spec.name}={monitor_last:.6f}"
+                if monitor_spec is not None and monitor_last is not None
+                else ""
+            )
             logger.info(
-                "Step %r %s: epoch %d/%d train_loss=%.6f val_loss=%.6f best_val=%.6f (epoch %.2fs)",
+                "Step %r %s: epoch %d/%d train_loss=%.6f val_loss=%.6f%s best=%.6f (epoch %.2fs)",
                 step_name,
                 model_label,
                 epochs_ran,
                 self.config.epochs,
                 train_last,
                 val_last,
+                log_monitor,
                 best_display,
                 epoch_dt,
             )
 
             if early is not None and stop_now:
                 stopped_early = True
+                metric_label = (
+                    monitor_spec.name if monitor_spec is not None else "val_loss"
+                )
                 logger.info(
-                    "Step %r %s: early stopping triggered after %d epochs (best val_loss=%.6f)",
+                    "Step %r %s: early stopping after %d epochs (best %s=%.6f)",
                     step_name,
                     model_label,
                     epochs_ran,
-                    early.best_loss,
+                    metric_label,
+                    early.best_score,
                 )
                 early.load_best_model(prepared)
                 break
@@ -300,15 +424,21 @@ class Trainer:
             persistent_msg = persistent_path
 
         total_dt = time.perf_counter() - run_t0
-        reported_best = early.best_loss if early is not None else best_val
+        if early is not None:
+            reported_checkpoint = early.best_score
+        elif val_metric is not None and best_monitor is not None:
+            reported_checkpoint = best_monitor
+        else:
+            reported_checkpoint = best_val
         logger.info(
-            "Step %r %s: done in %.1fs — epochs=%d/%s best_val_loss=%.6f train_loss=%.6f val_loss=%.6f checkpoint=%s",
+            "Step %r %s: done in %.1fs — epochs=%d/%s checkpoint_score=%.6f "
+            "train_loss=%.6f val_loss=%.6f checkpoint=%s",
             step_name,
             model_label,
             total_dt,
             epochs_ran,
             "early" if stopped_early else str(self.config.epochs),
-            reported_best,
+            reported_checkpoint,
             train_last,
             val_last,
             persistent_msg,
@@ -316,7 +446,7 @@ class Trainer:
 
         return ModelRunResult(
             model_label=model_label,
-            best_val_loss=early.best_loss if early is not None else best_val,
+            best_val_loss=best_val,
             epochs_ran=epochs_ran,
             stopped_early=stopped_early,
             checkpoint_path=persistent_path,
@@ -324,6 +454,14 @@ class Trainer:
             inference_meta=inference_meta,
             train_loss_last=train_last,
             val_loss_last=val_last,
+            monitor_name=monitor_spec.name if monitor_spec is not None else None,
+            best_monitor_value=(
+                early.best_score
+                if early is not None and monitor_spec is not None
+                else best_monitor
+            ),
+            monitor_mode=checkpoint_mode if monitor_spec is not None else None,
+            history=history,
         )
 
     def _run_epoch_train(
@@ -338,6 +476,7 @@ class Trainer:
         epoch: int,
         total_epochs: int,
     ) -> float:
+        """Run one training epoch and return mean loss per sample."""
         model.train()
         total = 0.0
         n = 0
@@ -364,10 +503,14 @@ class Trainer:
         *,
         epoch: int,
         total_epochs: int,
-    ) -> float:
+        val_metric: EpochMetric | None = None,
+    ) -> tuple[float, float | None]:
+        """Run one validation epoch; return mean loss and optional monitor value."""
         model.eval()
         total = 0.0
         n = 0
+        if val_metric is not None:
+            val_metric.reset()
         batch_pbar = tqdm(
             loader,
             desc=f"Val {epoch}/{total_epochs}",
@@ -379,5 +522,9 @@ class Trainer:
                 loss_sum, bs = task.eval_batch(model, batch, criterion, device)
                 total += loss_sum
                 n += bs
+                if val_metric is not None:
+                    task.update_monitor(val_metric, model, batch, device)
                 batch_pbar.set_postfix(loss=f"{total / max(n, 1):.4f}")
-        return total / max(n, 1)
+        val_loss = total / max(n, 1)
+        monitor_value = val_metric.compute() if val_metric is not None else None
+        return val_loss, monitor_value

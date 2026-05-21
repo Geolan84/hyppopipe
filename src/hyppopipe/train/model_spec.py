@@ -1,3 +1,9 @@
+"""Serialize and restore torchvision model factories for training and inference.
+
+Specs describe how to instantiate a compatible model shell before loading a
+``state_dict``, including optional ``WeightsEnum`` FQNs for correct architecture.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -9,7 +15,18 @@ from torch.nn import Module
 
 
 def _resolve_torchvision_weights_enum(fqn: str) -> Any:
-    """Восстанавливает член ``torchvision`` ``WeightsEnum`` по строке из ``model_spec``."""
+    """Resolve a ``torchvision`` ``WeightsEnum`` member from a fully qualified name.
+
+    Args:
+        fqn: Dotted path such as
+            ``torchvision.models.ResNet50_Weights.DEFAULT``.
+
+    Returns:
+        The corresponding weights enum member.
+
+    Raises:
+        ValueError: If ``fqn`` does not have at least module, enum class, and member.
+    """
     parts = fqn.split(".")
     if len(parts) < 3:
         msg = f"Invalid weights_enum FQN: {fqn!r}"
@@ -23,6 +40,14 @@ def _resolve_torchvision_weights_enum(fqn: str) -> Any:
 
 
 def model_spec_from_module(module: Module) -> dict[str, Any]:
+    """Build a minimal spec for an already-instantiated ``Module``.
+
+    Args:
+        module: Trained or untrained model instance.
+
+    Returns:
+        Spec with ``kind='instantiated'`` and import path for the class.
+    """
     cls = module.__class__
     return {
         "kind": "instantiated",
@@ -32,16 +57,25 @@ def model_spec_from_module(module: Module) -> dict[str, Any]:
 
 
 def instantiate_base_from_spec(spec: Mapping[str, Any]) -> Module:
-    """Build a model shell compatible with the saved ``state_dict`` (then ``load_state_dict`` fills tensors).
+    """Instantiate a model shell compatible with a saved ``state_dict``.
 
     Torchvision ``ssdlite320_mobilenet_v3_large`` changes backbone width depending on
     ``weights`` / ``weights_backbone`` (see ``reduced_tail`` in torchvision). Training with
     ``weights=COCO_V1`` matches ``weights=None, weights_backbone=None``, not bare
     ``weights=None`` (which defaults to ImageNet backbone and wider channels).
 
-    Если в ``spec`` есть ``weights_enum`` (как у ``ModelCandidate``), фабрика вызывается с
-    ``weights=…`` — так восстанавливается та же схема, что при обучении (например DeepLab с
-    ``aux_classifier`` при ``DeepLabV3_ResNet50_Weights.DEFAULT``).
+    When ``spec`` contains ``weights_enum`` (as from ``ModelCandidate``), the factory is
+    called with ``weights=...`` so the architecture matches training (e.g. DeepLab with
+    ``aux_classifier`` when using ``DeepLabV3_ResNet50_Weights.DEFAULT``).
+
+    Args:
+        spec: Serialized factory descriptor (``kind='torchvision_factory'``).
+
+    Returns:
+        Fresh model instance; weights are not loaded.
+
+    Raises:
+        ValueError: If ``spec`` is not a supported torchvision factory descriptor.
     """
     kind = spec.get("kind")
     if kind != "torchvision_factory":

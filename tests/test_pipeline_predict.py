@@ -12,6 +12,7 @@ from hyppopipe.inference.types import LocalizationPrediction
 from hyppopipe.pipeline import Pipeline, Step
 from hyppopipe.pipeline.image.classification import ImageClassifier
 from hyppopipe.pipeline.image.localization import ImageLocalizer
+from hyppopipe.pipeline.image.transform import ImageTransformer
 from hyppopipe.pipeline.pipeline import _topological_step_order
 from hyppopipe.train.bundle import PredictBundle, export_train_result
 from hyppopipe.train.result import ModelRunResult, StepTrainResult, TrainResult
@@ -229,6 +230,28 @@ def test_shift_result_matches_explicit_linear_deps() -> None:
         assert pipe_shift._predict_step_inputs(
             ordered, idx, name, step
         ) == pipe_explicit._get_inputs(name, step)
+
+
+def test_predict_transform_only_without_train_result() -> None:
+    image = Image(torch.randint(0, 256, (3, 32, 32), dtype=torch.uint8))
+    pipe = Pipeline(
+        {
+            "transform": Step(
+                ImageTransformer().resize(16),
+            ),
+        }
+    )
+    result = pipe.predict(image)
+    out = result.outputs["transform"]
+    assert isinstance(out, Image)
+    assert out.body.shape[-2:] == (16, 16)
+
+
+def test_predict_transform_only_rejects_train_artifacts() -> None:
+    pipe = Pipeline({"transform": Step(ImageTransformer().resize(8))})
+    image = Image(torch.zeros(3, 4, 4))
+    with pytest.raises(ValueError, match="no steps that require trained weights"):
+        pipe.predict(image, train_result=TrainResult(steps={}))
 
 
 def test_shift_result_false_uses_step_inputs_only() -> None:

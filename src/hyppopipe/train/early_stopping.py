@@ -1,12 +1,18 @@
+"""Validation-score early stopping with optional checkpoint persistence."""
+
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from torch.nn import Module
 
+MonitorMode = Literal["min", "max"]
+
 
 class EarlyStopping:
+    """Stop training when a validation score stops improving for ``patience`` epochs."""
+
     def __init__(
         self,
         patience: int = 5,
@@ -15,20 +21,46 @@ class EarlyStopping:
         save_path: str = "best_model.pth",
         *,
         save_to_disk: bool = True,
+        mode: MonitorMode = "min",
     ):
+        """Configure patience, improvement threshold, and checkpoint behavior.
+
+        Args:
+            patience: Epochs without sufficient improvement before stopping.
+            delta: Minimum improvement over the best score to reset the counter.
+            verbose: Print counter and checkpoint messages to stdout.
+            save_path: File path when ``save_to_disk`` is True.
+            save_to_disk: Persist best weights to disk; otherwise keep them in memory.
+            mode: ``min`` for loss-like scores, ``max`` for accuracy/F1/Dice-like scores.
+        """
         self.patience = patience
         self.delta = delta
         self.verbose = verbose
         self.save_path = save_path
         self.save_to_disk = save_to_disk
-        self.best_loss = float("inf")
+        self.mode = mode
+        self.best_score = float("inf") if mode == "min" else float("-inf")
         self.counter = 0
         self.early_stop = False
         self._best_state: dict[str, Any] | None = None
 
-    def __call__(self, model: Module, val_loss: float) -> bool:
-        if val_loss < self.best_loss - self.delta:
-            self.best_loss = val_loss
+    @property
+    def best_loss(self) -> float:
+        """Backward-compatible alias for :attr:`best_score` (loss-style naming)."""
+        return self.best_score
+
+    def __call__(self, model: Module, score: float) -> bool:
+        """Update state after one validation epoch.
+
+        Args:
+            model: Model whose weights are checkpointed on improvement.
+            score: Validation loss or monitor value for the epoch.
+
+        Returns:
+            True if training should stop.
+        """
+        if self._improved(score):
+            self.best_score = score
             self.counter = 0
             self.save_checkpoint(model)
         else:
@@ -40,7 +72,13 @@ class EarlyStopping:
 
         return self.early_stop
 
+    def _improved(self, score: float) -> bool:
+        if self.mode == "min":
+            return score < self.best_score - self.delta
+        return score > self.best_score + self.delta
+
     def save_checkpoint(self, model: Module) -> None:
+        """Persist the current model as the best checkpoint."""
         state = model.state_dict()
         self._best_state = {k: v.detach().cpu().clone() for k, v in state.items()}
         if self.save_to_disk:
@@ -54,6 +92,7 @@ class EarlyStopping:
             print(msg)
 
     def load_best_model(self, model: Module) -> None:
+        """Restore the best weights into ``model`` from memory or disk."""
         if self._best_state is not None:
             model.load_state_dict(self._best_state)
         else:

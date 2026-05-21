@@ -1,4 +1,8 @@
-"""Детекционный сплит → классификация по вырезанному ROI (как в chained predict)."""
+"""Adapt detection splits to ROI crop classification training.
+
+Wraps a detection dataset to yield cropped CHW tensors and integer class labels,
+matching the chained predict flow (localize then classify a region).
+"""
 
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _crop_xyxy_chw(chw: Tensor, box: Tensor) -> Tensor:
-    """CHW tensor, box xyxy в пикселях."""
+    """Crop a CHW tensor using an xyxy box in pixel coordinates."""
     x1, y1, x2, y2 = box.detach().cpu().tolist()
     x1i = max(int(x1), 0)
     y1i = max(int(y1), 0)
@@ -28,6 +32,7 @@ def _crop_xyxy_chw(chw: Tensor, box: Tensor) -> Tensor:
 
 
 def _label_from_largest_fg_box(target: dict[str, Tensor]) -> int:
+    """Return 0-based class index from the largest foreground box in a detection target."""
     boxes = target["boxes"]
     labels = target["labels"]
     if boxes.numel() == 0 or labels.numel() == 0:
@@ -43,7 +48,19 @@ def _label_from_largest_fg_box(target: dict[str, Tensor]) -> int:
 
 
 def resolve_roi_classification_label(dataset: Dataset[Any], index: int) -> int:
-    """Метка класса для ROI-обучения: ``roi_classification_label`` или эвристика по GT-боксам."""
+    """Resolve the 0-based class label for ROI classification at ``index``.
+
+    Uses ``roi_classification_label`` when implemented on the dataset (or inner
+    dataset of a ``Subset``); otherwise falls back to the largest foreground
+    ground-truth box in the detection target.
+
+    Args:
+        dataset: Detection or compatible dataset.
+        index: Sample index.
+
+    Returns:
+        0-based class index for the ROI at ``index``.
+    """
     if isinstance(dataset, Subset):
         inner_i = int(dataset.indices[index])
         return resolve_roi_classification_label(
@@ -62,7 +79,12 @@ BoxPolicy = Literal["largest_area"]
 
 
 class RoiCropClassificationDataset(Sized, Dataset[tuple[Tensor, int]]):
-    """Обёртка над детекционным датасетом: на выходе кроп CHW float и int-метка класса."""
+    """Wrap a detection dataset to emit ROI crops and class indices.
+
+    Crops the largest foreground bounding box from each sample (or the full image
+    when boxes are empty). Class labels are resolved via
+    ``resolve_roi_classification_label``.
+    """
 
     def __init__(
         self,
@@ -70,6 +92,12 @@ class RoiCropClassificationDataset(Sized, Dataset[tuple[Tensor, int]]):
         *,
         box_policy: BoxPolicy = "largest_area",
     ) -> None:
+        """Create a ROI classification view over a detection dataset.
+
+        Args:
+            detection_dataset: Source dataset yielding ``(image, target)`` pairs.
+            box_policy: Box selection strategy; only ``"largest_area"`` is used.
+        """
         self._base = detection_dataset
         self._box_policy: BoxPolicy = box_policy
         classes = getattr(detection_dataset, "classes", None)
@@ -78,9 +106,21 @@ class RoiCropClassificationDataset(Sized, Dataset[tuple[Tensor, int]]):
         )
 
     def __len__(self) -> int:
+        """Number of samples in the underlying detection dataset."""
         return len(self._base)
 
     def __getitem__(self, index: int) -> tuple[Tensor, int]:
+        """Return a cropped CHW tensor and 0-based class index.
+
+        Args:
+            index: Sample index.
+
+        Returns:
+            Cropped (or full) image tensor and integer class label.
+
+        Raises:
+            TypeError: If the base dataset does not return a CHW ``Tensor`` image.
+        """
         _ = self._box_policy
         img, target = self._base[index]
         if not isinstance(img, Tensor):
@@ -111,6 +151,18 @@ class RoiCropClassificationDataset(Sized, Dataset[tuple[Tensor, int]]):
 
 
 def adapt_split_for_roi_classification(split_part: Any) -> RoiCropClassificationDataset:
-    """``SplitData.train``/``val`` → датасет *(crop, class_index)* в духе predict после детектора."""
+    """Adapt a ``SplitData`` train/val part to ROI crop classification samples.
+
+    Resolves detection datasets from split resources (e.g. YAML splits) and
+    wraps them so each item is ``(crop_tensor, class_index)``, analogous to
+    training after a detector in a chained pipeline.
+
+    Args:
+        split_part: A split resource or dataset accepted by
+            ``adapt_dataset_for_detection``.
+
+    Returns:
+        Dataset yielding cropped tensors and 0-based class indices.
+    """
     det = adapt_dataset_for_detection(split_part)
     return RoiCropClassificationDataset(det)

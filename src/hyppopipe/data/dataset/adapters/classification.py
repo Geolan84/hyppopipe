@@ -1,4 +1,4 @@
-"""Преобразование сплита в ``Dataset`` для задачи классификации."""
+"""Adapt generic dataset splits for classification training."""
 
 from __future__ import annotations
 
@@ -14,11 +14,24 @@ from hyppopipe.data.dataset.readers.yaml_dataset import ConcatClassificationData
 def adapt_dataset_for_classification(
     ds: Subset | ClassificationConvertible | ConcatDataset | Dataset,
 ) -> Dataset[tuple[Any, int]]:
-    """
-    Возвращает torch-датасет с элементами ``(sample, int_label)``.
+    """Return a torch dataset yielding ``(sample, int_label)`` elements.
 
-    Поддерживаются объекты с ``as_classification_dataset()``, ``ImageFolderDataset``,
-    ``Subset`` и ``ConcatDataset`` над совместимыми частями.
+    Supports objects with ``as_classification_dataset()``, ``ImageFolderDataset``,
+    ``Subset``, and ``ConcatDataset`` over compatible parts.
+
+    Example:
+        Wrap a folder dataset before training::
+
+            train_ds = adapt_dataset_for_classification(folder.split.train)
+
+    Args:
+        ds: Dataset, subset, concat, or :class:`~hyppopipe.data.dataset.protocols.ClassificationConvertible`.
+
+    Returns:
+        Classification-ready dataset.
+
+    Raises:
+        ClassificationDataUnsupportedError: If the source cannot be converted.
     """
     if isinstance(ds, Subset):
         inner = adapt_dataset_for_classification(cast(Any, ds.dataset))

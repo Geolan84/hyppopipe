@@ -1,12 +1,18 @@
+"""Shared types and sentinel values for hyppopipe."""
+
 from typing import Any, Self
 
 NO_VALUE = object()
+"""Sentinel indicating that no previous pipeline result was passed to a step."""
 
 
-class HyppopipeError(Exception): ...
+class HyppopipeError(Exception):
+    """Base exception for hyppopipe framework errors."""
 
 
 class Percentage(float):
+    """Float constrained to the closed interval ``[0.0, 1.0]``."""
+
     def __new__(cls, value: Any) -> Self:
         val = float(value)
         if not 0.0 <= val <= 1.0:
@@ -15,6 +21,8 @@ class Percentage(float):
 
 
 class PositiveInt(int):
+    """Integer strictly greater than zero."""
+
     def __new__(cls, value: Any) -> Self:
         val = int(value)
         if val <= 0:
@@ -23,6 +31,8 @@ class PositiveInt(int):
 
 
 class NonNegativeInt(int):
+    """Integer greater than or equal to zero."""
+
     def __new__(cls, value: Any) -> Self:
         val = int(value)
         if val < 0:

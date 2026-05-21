@@ -1,3 +1,5 @@
+"""Step-level inference runners for classification, detection, and segmentation."""
+
 from __future__ import annotations
 
 import logging
@@ -18,6 +20,7 @@ from hyppopipe.inference.types import (
 from hyppopipe.pipeline.image.classification import ImageClassifier
 from hyppopipe.pipeline.image.localization import ImageLocalizer
 from hyppopipe.pipeline.image.segmentation import ImageSegmentator
+from hyppopipe.pipeline.image.transform import ImageTransformer
 from hyppopipe.pipeline.step import Step
 from hyppopipe.train.bundle import StepArtifact
 from hyppopipe.train.tasks.classification_transforms import (
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def _tensor_for_detection(image: Image, device: torch.device) -> Tensor:
+    """Normalize ``image`` to float CHW on ``device`` for detection models."""
     x = image.body
     if x.dtype == torch.uint8:
         x = x.float().div_(255.0)
@@ -64,6 +68,19 @@ def run_localization(
     class_names: list[str] | None = None,
     sample_id_suffix: str = "_crop",
 ) -> LocalizationPrediction:
+    """Run a detection model and build a crop for downstream steps.
+
+    Args:
+        model: Torchvision detection module in eval mode.
+        image: Input image.
+        device: Torch device.
+        score_thresh: Minimum score to accept a box; falls back to full image otherwise.
+        class_names: Optional label strings for visualization.
+        sample_id_suffix: Suffix appended to ``crop.sample_id``.
+
+    Returns:
+        Detections, best crop, and fallback metadata.
+    """
     model.eval()
     inp = _tensor_for_detection(image, device)
     with torch.no_grad():
@@ -115,6 +132,7 @@ def run_classification(
     *,
     device: torch.device,
 ) -> ClassificationPrediction:
+    """Run classification using transforms stored in ``artifact.inference_meta``."""
     meta = artifact.inference_meta
     cc = meta.get("canonical_in_channels")
     if cc is None:
@@ -150,6 +168,7 @@ def run_segmentation(
     device: torch.device,
     score_thresh: float,
 ) -> SegmentationPrediction:
+    """Run instance or semantic segmentation according to ``artifact.inference_meta``."""
     meta = artifact.inference_meta
     kind = meta.get("kind")
     if kind == "instance":
@@ -213,7 +232,38 @@ def run_segmentation(
     )
 
 
+def step_needs_artifact(action: object) -> bool:
+    """Return True when predict must load trained weights for ``action``."""
+    return isinstance(action, (ImageClassifier, ImageLocalizer, ImageSegmentator))
+
+
+def run_step_without_artifact(
+    step: Step,
+    inputs: tuple[Any, ...],
+) -> Image | Any:
+    """Run a pipeline step that does not use a trained model checkpoint."""
+    if step.input_prepare is not None:
+        inputs = step.input_prepare(inputs)
+    if isinstance(step.action, ImageTransformer):
+        return step.action(image_from_step_inputs(inputs))
+    if len(inputs) == 1:
+        return step.action(inputs[0], *step.action_args, **step.action_kwargs)
+    return step.action(*inputs, *step.action_args, **step.action_kwargs)
+
+
 def image_from_step_inputs(inputs: tuple[Any, ...]) -> Image:
+    """Extract an :class:`~hyppopipe.data.image.Image` from pipeline step inputs.
+
+    Args:
+        inputs: Tuple whose head is ``Image`` or ``LocalizationPrediction``.
+
+    Returns:
+        Raw image or localization crop.
+
+    Raises:
+        ValueError: If inputs are empty.
+        TypeError: If the head type is unsupported.
+    """
     if not inputs:
         msg = "Step has no inputs"
         raise ValueError(msg)
@@ -237,6 +287,24 @@ def run_step_inference(
     models_cache: dict[str, Module],
     step_base_models: dict[str, Module] | None,
 ) -> LocalizationPrediction | ClassificationPrediction | SegmentationPrediction:
+    """Dispatch inference for a single pipeline step.
+
+    Args:
+        step_name: Step identifier (model cache key).
+        step: Step definition with ``action`` and optional ``input_prepare``.
+        inputs: Resolved registry values for the step.
+        artifact: Weights and metadata from a :class:`~hyppopipe.train.bundle.PredictBundle`.
+        device: Torch device.
+        score_thresh: Detection/segmentation score threshold.
+        models_cache: Reused loaded models keyed by step name.
+        step_base_models: Optional pre-built bases when the spec cannot rebuild alone.
+
+    Returns:
+        Task-specific prediction object.
+
+    Raises:
+        TypeError: If ``step.action`` is not a supported functor.
+    """
     if step.input_prepare is not None:
         inputs = step.input_prepare(inputs)
     if step_name not in models_cache:

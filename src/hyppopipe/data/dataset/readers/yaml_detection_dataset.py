@@ -1,4 +1,8 @@
-"""Датасеты детекции из YAML Ultralytics/YOLOv5."""
+"""Object-detection datasets from Ultralytics/YOLOv5 YAML splits.
+
+Loads YOLO-format label files alongside images, supporting nested per-class
+layouts and flat ``images``/``labels`` directory trees.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ _NormalizedBox = tuple[int, float, float, float, float]
 
 
 def _swap_images_dir_to_labels(split_images_root: Path) -> Path:
+    """Replace the ``images`` path segment with ``labels`` for flat YOLO layout."""
     parts = list(split_images_root.parts)
     try:
         i = parts.index("images")
@@ -34,6 +39,7 @@ def _swap_images_dir_to_labels(split_images_root: Path) -> Path:
 
 
 def _iter_images(directory: Path) -> list[Path]:
+    """List supported image files in a single directory (non-recursive)."""
     out: list[Path] = []
     for fname in sorted(os.listdir(directory)):
         p = directory / fname
@@ -43,6 +49,7 @@ def _iter_images(directory: Path) -> list[Path]:
 
 
 def _iter_images_rglob(root: Path) -> list[Path]:
+    """List supported image files under ``root`` recursively."""
     return sorted(
         p
         for p in root.rglob("*")
@@ -51,10 +58,12 @@ def _iter_images_rglob(root: Path) -> list[Path]:
 
 
 def _clip_normalized(value: float) -> float:
+    """Clamp a normalized coordinate to ``[0.0, 1.0]``."""
     return max(0.0, min(value, 1.0))
 
 
 def _normalized_box_from_yolo_parts(parts: list[str]) -> _NormalizedBox | None:
+    """Parse a YOLO bbox or polygon line into a normalized xyxy box, or None."""
     if len(parts) == 5:
         cls_id = int(float(parts[0]))
         cx, cy, w, h = map(float, parts[1:5])
@@ -86,7 +95,20 @@ def _normalized_box_from_yolo_parts(parts: list[str]) -> _NormalizedBox | None:
 def _flat_yolo_roi_cls_from_label_file(
     lbl_path: Path | None, *, num_foreground_classes: int
 ) -> int:
-    """0-based класс для ROI-классификации: YOLO-класс объекта с максимальной площадью."""
+    """Derive a 0-based ROI classification label from a YOLO label file.
+
+    Uses the class id of the normalized box with the largest area.
+
+    Args:
+        lbl_path: Path to ``.txt`` labels, or None if missing.
+        num_foreground_classes: Number of foreground classes in the dataset.
+
+    Returns:
+        0-based class index for ROI classification, or 0 when no boxes exist.
+
+    Raises:
+        ValueError: If a box class id is outside ``[0, num_foreground_classes)``.
+    """
     if lbl_path is None or not lbl_path.is_file():
         return 0
     text = lbl_path.read_text(encoding="utf-8")
@@ -117,6 +139,7 @@ def _flat_yolo_roi_cls_from_label_file(
 def _parse_yolo_bbox_lines(
     text: str, *, img_w: int, img_h: int
 ) -> tuple[Tensor, Tensor]:
+    """Parse YOLO label text into pixel-space boxes and 0-based class ids."""
     boxes: list[list[float]] = []
     labels: list[int] = []
     for raw in text.splitlines():
@@ -142,14 +165,37 @@ def _parse_yolo_bbox_lines(
 
 
 class ConcatDetectionDataset(ConcatDataset):
+    """Concatenated detection splits with shared ``classes`` metadata."""
+
     def __init__(self, datasets: list[Dataset], classes: list[str]) -> None:
+        """Concatenate detection datasets.
+
+        Args:
+            datasets: Per-entry detection datasets.
+            classes: Class names shared by all parts.
+        """
         super().__init__(datasets)
         self.classes = list(classes)
 
     def as_detection_dataset(self) -> ConcatDetectionDataset:
+        """Return this dataset for detection training."""
         return self
 
     def roi_classification_label(self, index: int) -> int:
+        """0-based class label for ROI classification at global ``index``.
+
+        Delegates to each sub-dataset's ``roi_classification_label`` when present.
+
+        Args:
+            index: Index into the concatenated dataset.
+
+        Returns:
+            Class index for cropping-based classification.
+
+        Raises:
+            TypeError: If a sub-dataset lacks ``roi_classification_label``.
+            IndexError: If ``index`` is out of range.
+        """
         i = int(index)
         for ds in self.datasets:
             n = len(cast(Sized, ds))
@@ -167,7 +213,7 @@ class ConcatDetectionDataset(ConcatDataset):
 
 
 class YAMLDetectionSplitDataset(Dataset[tuple[Tensor, dict[str, Tensor]]]):
-    """Один сплит: изображения и YOLO-.txt с bbox или сегментационными полигонами."""
+    """One detection split with YOLO ``.txt`` bbox or polygon-derived boxes."""
 
     def __init__(
         self,
@@ -176,6 +222,16 @@ class YAMLDetectionSplitDataset(Dataset[tuple[Tensor, dict[str, Tensor]]]):
         *,
         layout: DetectionLayout = "auto",
     ) -> None:
+        """Index image paths and optional label files under ``split_root``.
+
+        Args:
+            split_root: Resolved split directory from YAML.
+            class_names: Foreground class names (0-based ids in labels).
+            layout: Directory layout strategy or ``"auto"`` to infer it.
+
+        Raises:
+            InvalidDatasetConfigError: If layout cannot be inferred or no samples exist.
+        """
         self.split_root = split_root.resolve()
         self.classes = list(class_names)
         self.num_foreground_classes = len(class_names)
@@ -193,12 +249,23 @@ class YAMLDetectionSplitDataset(Dataset[tuple[Tensor, dict[str, Tensor]]]):
             )
 
     def as_detection_dataset(self) -> YAMLDetectionSplitDataset:
+        """Return this split dataset for detection training."""
         return self
 
     def roi_classification_label(self, index: int) -> int:
+        """0-based class label for ROI training at ``index``.
+
+        Args:
+            index: Sample index.
+
+        Returns:
+            Precomputed ROI class (folder name in nested layout, or largest box
+            in flat YOLO layout).
+        """
         return int(self._roi_cls_label_per_sample[index])
 
     def _infer_layout(self) -> Literal["nested_class", "flat_yolo"]:
+        """Detect nested per-class folders vs flat Ultralytics-style layout."""
         for c in self.classes:
             if (self.split_root / c / "images").is_dir():
                 return "nested_class"
@@ -211,12 +278,14 @@ class YAMLDetectionSplitDataset(Dataset[tuple[Tensor, dict[str, Tensor]]]):
         )
 
     def _build_index(self) -> None:
+        """Populate ``samples`` using the resolved layout strategy."""
         if self._layout == "nested_class":
             self._build_nested_class_index()
         else:
             self._build_flat_yolo_index()
 
     def _build_nested_class_index(self) -> None:
+        """Index images under ``<class>/images`` with optional parallel ``labels``."""
         for cls_idx, cls_name in enumerate(self.classes):
             cls_dir = self.split_root / cls_name
             if not cls_dir.is_dir():
@@ -233,6 +302,7 @@ class YAMLDetectionSplitDataset(Dataset[tuple[Tensor, dict[str, Tensor]]]):
                 self._roi_cls_label_per_sample.append(cls_idx)
 
     def _build_flat_yolo_index(self) -> None:
+        """Index all images under ``split_root`` with YOLO labels mirrored under ``labels``."""
         labels_root = _swap_images_dir_to_labels(self.split_root)
         for img_path in _iter_images_rglob(self.split_root):
             rel = img_path.relative_to(self.split_root)
@@ -245,9 +315,24 @@ class YAMLDetectionSplitDataset(Dataset[tuple[Tensor, dict[str, Tensor]]]):
             self._roi_cls_label_per_sample.append(cls_lbl)
 
     def __len__(self) -> int:
+        """Number of detection samples."""
         return len(self.samples)
 
     def __getitem__(self, index: int) -> tuple[Tensor, dict[str, Tensor]]:
+        """Load CHW image tensor and torchvision detection target.
+
+        Label ids in the target are 1-based (background is 0) to match torchvision
+        detection models.
+
+        Args:
+            index: Sample index.
+
+        Returns:
+            Normalized RGB image tensor and a dict with ``boxes`` and ``labels``.
+
+        Raises:
+            ValueError: If a label class id is out of range.
+        """
         img_path, lbl_path = self.samples[index]
         img = read_image(str(img_path), mode=ImageReadMode.RGB).float() / 255.0
         _, h, w = img.shape
@@ -270,6 +355,7 @@ def _dataset_for_split_root(
     *,
     layout: DetectionLayout,
 ) -> Dataset:
+    """Wrap a resolved split path as a ``YAMLDetectionSplitDataset``."""
     ds = YAMLDetectionSplitDataset(resolved, class_names, layout=layout)
     return ds
 
@@ -282,6 +368,19 @@ def concat_detection_split(
     class_names: list[str],
     layout: DetectionLayout | str = "auto",
 ) -> Dataset:
+    """Build a detection dataset for one or more YAML split entries.
+
+    Args:
+        entries: Split path string or list of paths from ``data.yaml``.
+        yaml_dir: Directory containing the dataset YAML.
+        dataset_root: Resolved dataset root from the config ``path`` field.
+        class_names: Class names from YAML ``names``.
+        layout: Detection directory layout or ``"auto"``.
+
+    Returns:
+        A single split dataset or ``ConcatDetectionDataset`` when multiple entries
+        are given.
+    """
     paths = [entries] if isinstance(entries, str) else entries
     lay = cast(DetectionLayout, layout)
     parts: list[Dataset] = []

@@ -1,3 +1,10 @@
+"""Ultralytics/YOLOv5 YAML dataset configuration and classification loaders.
+
+Reads ``data.yaml``-style configs, resolves split paths, and exposes train/val/test
+resources that can be materialized as classification, detection, or segmentation
+datasets via ``YAMLDataset`` and ``YAMLSplitResource``.
+"""
+
 from __future__ import annotations
 
 import os
@@ -15,10 +22,12 @@ from hyppopipe.data.image import SUPPORTED_FILE_TYPES, Image
 
 
 def _is_absolute_or_uri(s: str) -> bool:
+    """Return True if ``s`` is an absolute path or URI-like string."""
     return bool(s) and (s.startswith("/") or "://" in s)
 
 
 def _resolve_path_field(yaml_dir: Path, path_field: str) -> Path:
+    """Resolve the YAML ``path`` field to an absolute dataset root."""
     p = Path(path_field).expanduser()
     if p.is_absolute() or _is_absolute_or_uri(path_field):
         return p
@@ -28,6 +37,7 @@ def _resolve_path_field(yaml_dir: Path, path_field: str) -> Path:
 
 
 def _resolve_split_entry(yaml_dir: Path, dataset_root: Path, entry: str) -> Path:
+    """Resolve a train/val/test entry path relative to YAML dir or dataset root."""
     e = Path(entry).expanduser()
     if e.is_absolute() or _is_absolute_or_uri(entry):
         return e
@@ -37,6 +47,20 @@ def _resolve_split_entry(yaml_dir: Path, dataset_root: Path, entry: str) -> Path
 
 
 def _normalize_names(names: object) -> list[str]:
+    """Parse ``names`` from YAML into an ordered list of class name strings.
+
+    Accepts a non-empty ``list[str]`` or a dict mapping contiguous class ids
+    ``0 .. nc-1`` to names (keys may be ``int`` or numeric strings).
+
+    Args:
+        names: Raw ``names`` field from the dataset YAML.
+
+    Returns:
+        Class names in index order.
+
+    Raises:
+        InvalidDatasetConfigError: If the value is empty or malformed.
+    """
     if isinstance(names, list):
         if not names or not all(isinstance(x, str) for x in names):
             raise InvalidDatasetConfigError("names list must be non-empty list[str]")
@@ -74,6 +98,7 @@ def _normalize_names(names: object) -> list[str]:
 
 
 def _coerce_split_field(raw: object, field_name: str) -> str | list[str]:
+    """Normalize a YAML split field to a string or non-empty list of strings."""
     if isinstance(raw, str):
         return raw
     if isinstance(raw, list):
@@ -86,6 +111,21 @@ def _coerce_split_field(raw: object, field_name: str) -> str | list[str]:
 
 
 def _parse_config_dict(raw: dict[str, object], path: Path) -> YAMLDatasetConfig:
+    """Build ``YAMLDatasetConfig`` from a parsed YAML mapping.
+
+    Validates required keys ``train``, ``val``, and ``names``, optional ``test``,
+    ``download``, and ``nc``, and normalizes path and name fields.
+
+    Args:
+        raw: Root mapping loaded from the dataset YAML file.
+        path: Default dataset root if ``path`` key is omitted.
+
+    Returns:
+        Frozen configuration dataclass.
+
+    Raises:
+        InvalidDatasetConfigError: On missing keys or invalid field types.
+    """
     try:
         path = raw.get("path", str(path))
         train = raw["train"]
@@ -143,7 +183,22 @@ def _parse_config_dict(raw: dict[str, object], path: Path) -> YAMLDatasetConfig:
 
 @dataclass(frozen=True, slots=True)
 class YAMLDatasetConfig:
-    """Detailed structure is available at wiki: https://deepwiki.com/ultralytics/yolov5/7.1-dataset-configuration"""
+    """Parsed Ultralytics/YOLOv5 ``data.yaml`` fields.
+
+    Field semantics match the upstream dataset configuration format; see
+    `Ultralytics dataset configuration`_ for layout details.
+
+    Attributes:
+        path: Dataset root path string from YAML (may be relative).
+        train: Train split path or list of paths.
+        val: Validation split path or list of paths.
+        names: Ordered class names.
+        test: Optional test split path(s).
+        download: Optional download script or URL hint.
+        nc: Number of classes (defaults to ``len(names)`` when omitted).
+
+    .. _Ultralytics dataset configuration: https://deepwiki.com/ultralytics/yolov5/7.1-dataset-configuration
+    """
 
     path: str
     train: str | list[str]
@@ -155,18 +210,25 @@ class YAMLDatasetConfig:
 
 
 class ConcatClassificationDataset(ConcatDataset):
-    """``ConcatDataset`` с атрибутом ``classes`` для совместимости с ``infer_num_classes``."""
+    """``ConcatDataset`` with a ``classes`` attribute for ``infer_num_classes``."""
 
     def __init__(self, datasets: list[Dataset], classes: list[str]) -> None:
+        """Concatenate split datasets and expose shared class names.
+
+        Args:
+            datasets: Per-entry classification datasets to concatenate.
+            classes: Class names shared by all parts.
+        """
         super().__init__(datasets)
         self.classes = list(classes)
 
     def as_classification_dataset(self) -> ConcatClassificationDataset:
+        """Return this concatenated dataset for classification training."""
         return self
 
 
 class YAMLClassificationSplitDataset(ImageDataset):
-    """Один сплит YOLO-классификации: в корне лежат подпапки с именами из ``names``."""
+    """One YAML classification split: class subfolders under ``root``."""
 
     def __init__(
         self,
@@ -176,6 +238,14 @@ class YAMLClassificationSplitDataset(ImageDataset):
         absorb_folders: bool = False,
         strict: bool = True,
     ) -> None:
+        """Index images for a single train/val/test entry.
+
+        Args:
+            root: Resolved split directory or list root.
+            class_names: Class names from the YAML ``names`` field.
+            absorb_folders: If True, allow ``root/<top>/<class>/`` nesting.
+            strict: Passed to ``Image.from_path`` when loading samples.
+        """
         self.root = root
         self._strict = strict
         self.classes = list(class_names)
@@ -186,6 +256,7 @@ class YAMLClassificationSplitDataset(ImageDataset):
             self._load_flat_class_dirs()
 
     def _collect_ext_files(self, directory: Path) -> list[str]:
+        """List supported image file paths under ``directory``."""
         out: list[str] = []
         for fname in os.listdir(directory):
             p = directory / fname
@@ -194,6 +265,7 @@ class YAMLClassificationSplitDataset(ImageDataset):
         return sorted(out)
 
     def _image_dir_for_class(self, cls_name: str) -> Path:
+        """Return the image directory for a class (``<class>/images`` or ``<class>``)."""
         base = self.root / cls_name
         if not base.is_dir():
             raise InvalidDatasetConfigError(
@@ -203,6 +275,7 @@ class YAMLClassificationSplitDataset(ImageDataset):
         return nested if nested.is_dir() else base
 
     def _load_flat_class_dirs(self) -> None:
+        """Index samples from class subfolders directly under ``root``."""
         c2i = self.class_to_idx
         self.samples = [
             (path, c2i[cls_name])
@@ -211,6 +284,7 @@ class YAMLClassificationSplitDataset(ImageDataset):
         ]
 
     def _load_nested_tops(self) -> None:
+        """Index samples from ``root/<top>/<class>/`` when ``absorb_folders`` is True."""
         c2i = self.class_to_idx
         self.samples = []
         tops = sorted(self.root.iterdir(), key=lambda p: p.name)
@@ -230,17 +304,28 @@ class YAMLClassificationSplitDataset(ImageDataset):
             )
 
     def as_classification_dataset(self) -> YAMLClassificationSplitDataset:
+        """Return this split dataset for classification training."""
         return self
 
     def __len__(self) -> int:
+        """Number of indexed samples."""
         return len(self.samples)
 
     def __getitem__(self, index: int) -> tuple[Image, int]:
+        """Load image and class index for ``index``.
+
+        Args:
+            index: Sample index.
+
+        Returns:
+            Loaded ``Image`` and integer class index.
+        """
         path, target = self.samples[index]
         return Image.from_path(path, strict=self._strict), int(target)
 
 
 def _read_txt_paths(txt_file: Path) -> list[str]:
+    """Read non-empty, non-comment lines from a split ``.txt`` file."""
     lines: list[str] = []
     with txt_file.open(encoding="utf-8") as f:
         for line in f:
@@ -259,6 +344,24 @@ def _dataset_for_entry(
     dataset_root: Path,
     strict: bool,
 ) -> Dataset:
+    """Materialize one split entry as a classification ``Dataset``.
+
+    Supports a class-folder directory, or a ``.txt`` file listing image paths
+    (class inferred from the parent folder name).
+
+    Args:
+        resolved: Absolute path to the split entry.
+        class_names: Allowed class names from YAML.
+        absorb_folders: Forwarded to ``YAMLClassificationSplitDataset``.
+        dataset_root: Dataset root for resolving relative paths in ``.txt`` lists.
+        strict: Passed when loading images.
+
+    Returns:
+        A non-empty classification dataset.
+
+    Raises:
+        InvalidDatasetConfigError: If the entry is empty or paths are invalid.
+    """
     if resolved.is_dir():
         ds = YAMLClassificationSplitDataset(
             resolved,
@@ -296,6 +399,8 @@ def _dataset_for_entry(
             raise InvalidDatasetConfigError(f"no valid images listed in {resolved}")
 
         class _ListDataset(ImageDataset, Dataset):
+            """Classification dataset backed by a fixed list of path/label pairs."""
+
             def __init__(
                 self,
                 items: list[tuple[str, int]],
@@ -303,17 +408,21 @@ def _dataset_for_entry(
                 *,
                 strict: bool,
             ) -> None:
+                """Store indexed samples and class metadata."""
                 self._items = items
                 self.classes = list(classes)
                 self._strict = strict
 
             def as_classification_dataset(self) -> _ListDataset:
+                """Return this list-backed dataset for classification training."""
                 return self
 
             def __len__(self) -> int:
+                """Number of indexed samples."""
                 return len(self._items)
 
             def __getitem__(self, index: int) -> tuple[Image, int]:
+                """Load image and class index for ``index``."""
                 p, y = self._items[index]
                 return Image.from_path(p, strict=self._strict), int(y)
 
@@ -333,6 +442,7 @@ def _concat_split(
     absorb_folders: bool,
     strict: bool,
 ) -> Dataset:
+    """Build one classification dataset (or concat) for YAML split entries."""
     paths = [entries] if isinstance(entries, str) else entries
     parts: list[Dataset] = []
     for entry in paths:
@@ -354,14 +464,33 @@ def _concat_split(
 def resolve_ultralytics_split_entry(
     yaml_dir: Path, dataset_root: Path, entry: str
 ) -> Path:
-    """Разрешает поле ``train``/``val``/``test`` относительно корня датасета и YAML."""
+    """Resolve a ``train``/``val``/``test`` path relative to YAML and dataset root.
+
+    Args:
+        yaml_dir: Directory containing the dataset YAML file.
+        dataset_root: Resolved ``path`` field from the config.
+        entry: Split path string from the YAML.
+
+    Returns:
+        Absolute filesystem path to the split entry.
+    """
     return _resolve_split_entry(yaml_dir, dataset_root, entry)
 
 
 def load_ultralytics_dataset_yaml(
     path_to_yaml: str | Path,
 ) -> tuple[YAMLDatasetConfig, Path, Path]:
-    """Читает YAML датасета в формате Ultralytics/YOLOv5 и возвращает конфиг и пути."""
+    """Load and validate an Ultralytics/YOLOv5 dataset YAML file.
+
+    Args:
+        path_to_yaml: Path to ``data.yaml`` (or equivalent).
+
+    Returns:
+        A triple of parsed config, YAML parent directory, and resolved dataset root.
+
+    Raises:
+        InvalidDatasetConfigError: If the file is missing or fields are invalid.
+    """
     path_to_yaml = Path(path_to_yaml).expanduser().resolve()
     if not path_to_yaml.is_file():
         raise InvalidDatasetConfigError(f"YAML file not found: {path_to_yaml}")
@@ -385,7 +514,12 @@ def load_ultralytics_dataset_yaml(
 
 @dataclass(slots=True)
 class YAMLSplitResource:
-    """Один сплит из YAML Ultralytics: классификация и детекция строятся по запросу задачи."""
+    """Lazy handle for one YAML split (train, val, or test).
+
+    Classification, detection, and segmentation datasets are built on demand
+    via ``as_classification_dataset``, ``as_detection_dataset``, and
+    ``as_segmentation_dataset``.
+    """
 
     entries: str | list[str]
     yaml_dir: Path
@@ -396,6 +530,7 @@ class YAMLSplitResource:
     strict: bool = True
 
     def as_classification_dataset(self) -> Dataset:
+        """Build a classification dataset for this split."""
         return _concat_split(
             self.entries,
             yaml_dir=self.yaml_dir,
@@ -406,6 +541,7 @@ class YAMLSplitResource:
         )
 
     def as_detection_dataset(self) -> Dataset:
+        """Build a detection dataset for this split."""
         from hyppopipe.data.dataset.readers.yaml_detection_dataset import (
             concat_detection_split,
         )
@@ -419,6 +555,11 @@ class YAMLSplitResource:
         )
 
     def as_segmentation_dataset(self, *, kind: str = "instance") -> Dataset:
+        """Build a segmentation dataset for this split.
+
+        Args:
+            kind: ``"instance"`` or ``"semantic"`` segmentation target format.
+        """
         from hyppopipe.data.dataset.readers.yaml_segmentation_dataset import (
             concat_segmentation_split,
         )
@@ -434,7 +575,19 @@ class YAMLSplitResource:
 
 
 class YAMLDataset:
-    """Один YAML Ultralytics/YOLOv5: сплиты как ресурсы, задачи вызывают ``as_*_dataset()``."""
+    """Ultralytics/YOLOv5 YAML facade with lazy per-task split materialization.
+
+    Parses ``data.yaml``, exposes ``train``, ``val``, and optional ``test`` as
+    ``YAMLSplitResource`` objects, and provides ``as_split_data`` for training
+    pipelines.
+
+    Examples:
+        Load splits and build a classification training set::
+
+            ds = YAMLDataset("datasets/my_task/data.yaml")
+            split_data = ds.as_split_data()
+            train_set = split_data.train.as_classification_dataset()
+    """
 
     def __init__(
         self,
@@ -444,6 +597,15 @@ class YAMLDataset:
         detection_layout: str = "auto",
         strict: bool = True,
     ) -> None:
+        """Load dataset YAML and prepare split resources.
+
+        Args:
+            path_to_yaml: Path to the dataset YAML file.
+            absorb_folders: Allow nested top folders in classification layout.
+            detection_layout: ``"auto"``, ``"nested_class"``, or ``"flat_yolo"``
+                for detection/segmentation path layout.
+            strict: Passed when loading classification images.
+        """
         self.path_to_yaml = Path(path_to_yaml).expanduser().resolve()
         self.config, yaml_dir, dataset_root = load_ultralytics_dataset_yaml(
             self.path_to_yaml
@@ -485,7 +647,11 @@ class YAMLDataset:
             self.test = None
 
     def as_split_data(self) -> TrainVal | TrainValTest:
-        """Возвращает структуру для ``Trainer`` / ``Pipeline.train``."""
+        """Return train/val (and optional test) resources for ``Trainer``.
+
+        Returns:
+            ``TrainVal`` when the YAML has no ``test`` split, else ``TrainValTest``.
+        """
         if self.test is not None:
             return TrainValTest(train=self.train, val=self.val, test=self.test)
         return TrainVal(train=self.train, val=self.val)

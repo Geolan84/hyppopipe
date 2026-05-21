@@ -1,16 +1,19 @@
+"""Serializable prediction bundles (manifest + weights) for :meth:`~hyppopipe.pipeline.pipeline.Pipeline.predict`."""
+
 from __future__ import annotations
 
 import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from collections.abc import Mapping
 
-from hyppopipe.pipeline.step import Step
 from hyppopipe.train.result import ModelRunResult, StepTrainResult, TrainResult
-from hyppopipe.train.tasks.dispatch import dispatch_training_task
+
+if TYPE_CHECKING:
+    from hyppopipe.pipeline.step import Step
 
 MANIFEST_VERSION = 1
 MANIFEST_NAME = "manifest.json"
@@ -37,6 +40,17 @@ class PredictBundle:
 
     @classmethod
     def load(cls, root: Path | str) -> PredictBundle:
+        """Load a bundle from an export directory containing ``manifest.json``.
+
+        Args:
+            root: Directory created by :func:`export_train_result`.
+
+        Returns:
+            Bundle with resolved absolute weight paths.
+
+        Raises:
+            ValueError: If the manifest version is unsupported.
+        """
         root_path = Path(root).resolve()
         manifest_path = root_path / MANIFEST_NAME
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -64,10 +78,24 @@ class PredictBundle:
     def from_train_result(
         cls,
         train_result: TrainResult,
-        steps: Mapping[str, Step],
+        steps: Mapping[str, "Step"],
         *,
         run_index_by_step: dict[str, int] | None = None,
     ) -> PredictBundle:
+        """Build an in-memory bundle without copying weights to a new directory.
+
+        Args:
+            train_result: Training output to read checkpoints from.
+            steps: Pipeline steps (used to resolve task kinds).
+            run_index_by_step: Per-step run index; best validation loss when omitted.
+
+        Returns:
+            Ephemeral bundle with ``root=None``.
+
+        Raises:
+            KeyError: If a step name is missing from ``steps``.
+            ValueError: If a step has no completed runs.
+        """
         steps_out: dict[str, StepArtifact] = {}
         for step_name, step_tr in train_result.steps.items():
             run = _pick_run(
@@ -76,6 +104,8 @@ class PredictBundle:
             if step_name not in steps:
                 msg = f"Step {step_name!r} not found on pipeline"
                 raise KeyError(msg)
+            from hyppopipe.train.tasks.dispatch import dispatch_training_task
+
             dispatch_training_task(steps[step_name].action)
             task_kind = run.inference_meta.get("task", "unknown")
             steps_out[step_name] = StepArtifact(
@@ -88,13 +118,23 @@ class PredictBundle:
         return cls(root=None, steps=steps_out)
 
 
+def _run_sort_key(run: ModelRunResult) -> tuple[int, float]:
+    """Sort key: prefer monitor when set, else lowest validation loss."""
+    if run.monitor_name is not None and run.best_monitor_value is not None:
+        if run.monitor_mode == "max":
+            return (1, run.best_monitor_value)
+        return (1, -run.best_monitor_value)
+    return (0, -run.best_val_loss)
+
+
 def _pick_run(step_result: StepTrainResult, run_index: int | None) -> ModelRunResult:
+    """Select a run by index or the best monitor / lowest ``best_val_loss``."""
     if not step_result.runs:
         msg = f"Step {step_result.step_name!r} has no completed runs"
         raise ValueError(msg)
     if run_index is not None:
         return step_result.runs[run_index]
-    return min(step_result.runs, key=lambda r: r.best_val_loss)
+    return max(step_result.runs, key=_run_sort_key)
 
 
 def export_train_result(
@@ -104,7 +144,18 @@ def export_train_result(
     *,
     run_index_by_step: dict[str, int] | None = None,
     class_names_by_step: dict[str, list[str]] | None = None,
+    reports: bool = True,
 ) -> None:
+    """Copy checkpoints and write ``manifest.json`` under ``root``.
+
+    Args:
+        root: Export directory.
+        train_result: Training output to export.
+        steps: Pipeline steps keyed like ``train_result.steps``.
+        run_index_by_step: Per-step run index; best validation loss when omitted.
+        class_names_by_step: Optional class names stored per step in the manifest.
+        reports: When True, write training curves under ``reports/<step_name>/``.
+    """
     root.mkdir(parents=True, exist_ok=True)
     weights_dir = root / WEIGHTS_SUBDIR
     weights_dir.mkdir(parents=True, exist_ok=True)
@@ -119,6 +170,8 @@ def export_train_result(
         if step_name not in steps:
             msg = f"Step {step_name!r} not found on pipeline"
             raise KeyError(msg)
+        from hyppopipe.train.tasks.dispatch import dispatch_training_task
+
         dispatch_training_task(steps[step_name].action)
 
         dest = weights_dir / f"{step_name}.pth"
@@ -133,7 +186,15 @@ def export_train_result(
             "class_names": class_names_by_step.get(step_name),
             "model_label": run.model_label,
             "best_val_loss": run.best_val_loss,
+            "monitor_name": run.monitor_name,
+            "best_monitor_value": run.best_monitor_value,
+            "monitor_mode": run.monitor_mode,
         }
 
     manifest = {"version": MANIFEST_VERSION, "steps": manifest_steps}
     (root / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    if reports:
+        from hyppopipe.train.reporting import export_training_reports
+
+        export_training_reports(root, train_result.steps)

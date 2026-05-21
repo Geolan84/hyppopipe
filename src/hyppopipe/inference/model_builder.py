@@ -1,3 +1,5 @@
+"""Rebuild and load trained models from bundle artifacts."""
+
 from __future__ import annotations
 
 from typing import Any, cast
@@ -10,11 +12,6 @@ from hyppopipe.pipeline.image.localization import ImageLocalizer
 from hyppopipe.pipeline.image.segmentation import ImageSegmentator, SegmentationKind
 from hyppopipe.train.bundle import StepArtifact
 from hyppopipe.train.model_spec import instantiate_base_from_spec
-from hyppopipe.train.tasks.classification_model import (
-    prepare_classification_model_from_meta,
-)
-from hyppopipe.train.tasks.detection import prepare_detection_model_from_meta
-from hyppopipe.train.tasks.segmentation import prepare_segmentation_model_from_meta
 
 
 def build_and_load_step_model(
@@ -25,6 +22,22 @@ def build_and_load_step_model(
     device: torch.device,
     step_base_models: dict[str, Module] | None = None,
 ) -> Module:
+    """Instantiate the task-specific model and load ``artifact`` weights.
+
+    Args:
+        step_name: Step name (for error messages).
+        artifact: Checkpoint path, model spec, and inference metadata.
+        step_action: Functor on the pipeline step (classifier, localizer, segmentator).
+        device: Target device.
+        step_base_models: Fallback base modules when the spec is not a torchvision factory.
+
+    Returns:
+        Eval-mode model on ``device``.
+
+    Raises:
+        ValueError: If the spec or metadata cannot rebuild the model.
+        TypeError: If ``step_action`` does not match the task.
+    """
     meta = artifact.inference_meta
     task = meta.get("task")
     spec = artifact.model_spec
@@ -50,6 +63,10 @@ def build_and_load_step_model(
         if num_classes is None or in_ch is None:
             msg = f"Step {step_name!r}: inference_meta missing num_classes or canonical_in_channels"
             raise ValueError(msg)
+        from hyppopipe.train.tasks.classification_model import (
+            prepare_classification_model_from_meta,
+        )
+
         prepared = prepare_classification_model_from_meta(
             base,
             num_classes=int(num_classes),
@@ -63,6 +80,8 @@ def build_and_load_step_model(
         if n_cls is None:
             msg = f"Step {step_name!r}: inference_meta missing num_classes"
             raise ValueError(msg)
+        from hyppopipe.train.tasks.detection import prepare_detection_model_from_meta
+
         prepared = prepare_detection_model_from_meta(base, num_classes=int(n_cls))
     elif task == "segmentation":
         if not isinstance(step_action, ImageSegmentator):
@@ -73,6 +92,10 @@ def build_and_load_step_model(
         if n_cls is None or kind not in ("instance", "semantic"):
             msg = f"Step {step_name!r}: inference_meta missing num_classes or kind"
             raise ValueError(msg)
+        from hyppopipe.train.tasks.segmentation import (
+            prepare_segmentation_model_from_meta,
+        )
+
         prepared = prepare_segmentation_model_from_meta(
             base,
             kind=cast(SegmentationKind, kind),
