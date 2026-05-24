@@ -27,7 +27,7 @@ site_author = "Lanin George"
 # The site_url is the canonical URL for your site. When building online
 # documentation you should set this.
 # Read more: https://zensical.org/docs/setup/basics/#site_url
-#site_url = "https://www.example.com/"
+site_url = "https://geolan84.github.io/hyppopipe/"
 
 # The copyright notice appears in the page footer and can contain an HTML
 # fragment.
@@ -305,8 +305,8 @@ toggle.name = "Switch to light mode"
 #link = "https://github.com/user/repo"
 [project.extra]
 alternate = [
-    { name = "English", link = "/en/", lang = "en" },
-    { name = "Russian", link = "/ru/", lang = "ru" },
+    { name = "English", link = "/hyppopipe/en/", lang = "en" },
+    { name = "Russian", link = "/hyppopipe/ru/", lang = "ru" },
 ]
 
 [project.plugins.mkdocstrings.handlers.python]
