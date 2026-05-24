@@ -6,6 +6,8 @@ This type allows you to consistently describe the necessary changes for the imag
 
 The conversion can be single or multiple.
 
+`ImageTransformer` does not implement transforms itself — it combines `torchvision.transforms` and OpenCV. Medical-specific helpers include `circle_crop`, `ellipse_crop`, and `min_area_rect_crop` for fundus-camera images.
+
 ```python
 from hyppopipe.data.image import Image
 from hyppopipe.pipeline.image.transform import ImageTransformer
