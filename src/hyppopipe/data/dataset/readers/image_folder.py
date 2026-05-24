@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
+from torch import Tensor
+
 if TYPE_CHECKING:
     from hyppopipe.data.dataset.splits import TrainVal, TrainValTest
 
@@ -191,7 +193,7 @@ class PairedImageMaskFolderDataset(ImageDataset):
         """
         return split_random_fractions(self, fractions, seed=seed)
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
         """Load image tensor and semantic class map for ``index``.
 
         Args:
